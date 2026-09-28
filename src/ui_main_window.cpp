@@ -151,7 +151,6 @@ MainWindow::MainWindow(int width, int height, const std::string &title)
   save_traj_path_[sizeof(save_traj_path_) - 1] = '\0';
   std::memset(isotope_filter_, 0, sizeof(isotope_filter_));
   std::memset(abundance_plot_filter_, 0, sizeof(abundance_plot_filter_));
-  abundance_plot_log_floor_ = 1e-99;
   std::memset(file_name_input_, 0, sizeof(file_name_input_));
 
   // Initialize file browser
@@ -1383,16 +1382,18 @@ void MainWindow::render_trajectory_plot_panel() {
   ImGui::Text("Samples: %d", count);
   ImGui::SameLine();
   ImGui::Text("Current step: %d", static_cast<int>(current_index));
-  ImGui::Checkbox("Log x", &trajectory_plot_log_x_);
+  bool fit_plot = ImGui::Checkbox("Log x", &trajectory_plot_log_x_);
   ImGui::SameLine();
-  ImGui::Checkbox("Log y", &trajectory_plot_log_y_);
+  fit_plot |= ImGui::Checkbox("Log y", &trajectory_plot_log_y_);
+  ImGui::SameLine();
+  fit_plot |= ImGui::Button("Fit plot");
   if (trajectory_plot_log_x_ && !can_use_log_x) {
     ImGui::TextDisabled("Log x requires all trajectory times to be positive.");
   }
 
+  if (fit_plot) ImPlot::SetNextAxesToFit();
   if (ImPlot::BeginPlot("rho(t)##trajectory_rho", ImVec2(-1, 220))) {
-    ImPlot::SetupAxes("t (s)", "rho (g/cm^3)", ImPlotAxisFlags_AutoFit,
-                      ImPlotAxisFlags_AutoFit);
+    ImPlot::SetupAxes("t (s)", "rho (g/cm^3)");
     if (trajectory_plot_log_x_ && can_use_log_x) {
       ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
     }
@@ -1400,13 +1401,13 @@ void MainWindow::render_trajectory_plot_panel() {
       ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
     }
     ImPlot::PlotLine("rho", times.data(), rhos.data(), count);
-    ImPlot::PlotInfLines("current step", &current_time, 1);
+    plot_current_time("current step", current_time);
     ImPlot::EndPlot();
   }
 
+  if (fit_plot) ImPlot::SetNextAxesToFit();
   if (ImPlot::BeginPlot("T(t)##trajectory_temp", ImVec2(-1, 220))) {
-    ImPlot::SetupAxes("t (s)", "T (K)", ImPlotAxisFlags_AutoFit,
-                      ImPlotAxisFlags_AutoFit);
+    ImPlot::SetupAxes("t (s)", "T (K)");
     if (trajectory_plot_log_x_ && can_use_log_x) {
       ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
     }
@@ -1414,7 +1415,7 @@ void MainWindow::render_trajectory_plot_panel() {
       ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
     }
     ImPlot::PlotLine("T", times.data(), temps.data(), count);
-    ImPlot::PlotInfLines("current step", &current_time, 1);
+    plot_current_time("current step", current_time);
     ImPlot::EndPlot();
   }
 
@@ -1541,20 +1542,18 @@ void MainWindow::render_abundance_plot_panel() {
   }
 
   ImGui::Separator();
-  ImGui::Checkbox("Log x", &abundance_plot_log_x_);
+  bool fit_plot = ImGui::Checkbox("Log x", &abundance_plot_log_x_);
   ImGui::SameLine();
-  ImGui::Checkbox("Log y", &abundance_plot_log_y_);
+  fit_plot |= ImGui::Checkbox("Log y", &abundance_plot_log_y_);
   ImGui::SameLine();
   ImGui::Checkbox("Legend", &abundance_plot_legend_);
+  ImGui::SameLine();
+  fit_plot |= ImGui::Button("Fit plot");
+  if (abundance_plot_log_x_) {
+    fit_plot |= abundance_plot_x_floor_.draw("Log x floor (s)");
+  }
   if (abundance_plot_log_y_) {
-    ImGui::SetNextItemWidth(140.0f);
-    if (ImGui::InputDouble("Log floor", &abundance_plot_log_floor_, 0.0, 0.0,
-                           "%.3e")) {
-      if (!std::isfinite(abundance_plot_log_floor_) ||
-          abundance_plot_log_floor_ <= 0.0) {
-        abundance_plot_log_floor_ = 1e-99;
-      }
-    }
+    fit_plot |= abundance_plot_y_floor_.draw("Log y floor (X)");
   }
 
   if (cache.empty()) {
@@ -1569,34 +1568,21 @@ void MainWindow::render_abundance_plot_panel() {
     return;
   }
 
-  double x_floor = 0.0;
-  for (const auto &step : cache) {
-    if (step.time > 0.0 && (x_floor <= 0.0 || step.time < x_floor)) {
-      x_floor = step.time;
-    }
-  }
-  if (x_floor > 0.0) {
-    x_floor = std::max(x_floor * 0.1, 1e-99);
-  } else {
-    x_floor = 1e-99;
-  }
-  const double y_floor =
-      (std::isfinite(abundance_plot_log_floor_) &&
-       abundance_plot_log_floor_ > 0.0)
-          ? abundance_plot_log_floor_
-          : 1e-99;
+  const double x_floor = abundance_plot_x_floor_.value;
+  const double y_floor = abundance_plot_y_floor_.value;
 
   const ImPlotFlags plot_flags =
       abundance_plot_legend_ ? ImPlotFlags_None : ImPlotFlags_NoLegend;
+  if (fit_plot) ImPlot::SetNextAxesToFit();
   if (ImPlot::BeginPlot("X(t)##abundance_evolution", ImVec2(-1, 330),
                         plot_flags)) {
-    ImPlot::SetupAxes("t (s)", "X", ImPlotAxisFlags_AutoFit,
-                      ImPlotAxisFlags_AutoFit);
+    // Fit on first display; retain user limits on subsequent frames.
+    ImPlot::SetupAxes("t (s)", "X");
     if (abundance_plot_log_x_) {
-      ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
+      setup_log_plot_axis(ImAxis_X1, x_floor);
     }
     if (abundance_plot_log_y_) {
-      ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+      setup_log_plot_axis(ImAxis_Y1, y_floor);
     }
     if (abundance_plot_legend_) {
       ImPlot::SetupLegend(ImPlotLocation_NorthEast);
@@ -1631,10 +1617,7 @@ void MainWindow::render_abundance_plot_panel() {
     if (const auto *current =
             app_state_->get_trajectory_cache_step(
                 app_state_->current_trajectory_step())) {
-      double marker =
-          abundance_plot_log_x_ ? std::max(current->time, x_floor)
-                                : current->time;
-      ImPlot::PlotInfLines("current", &marker, 1);
+      plot_current_time("current", current->time);
     }
     ImPlot::EndPlot();
   }

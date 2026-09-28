@@ -1,6 +1,8 @@
 #ifndef IMYANN_UI_MAIN_WINDOW_H
 #define IMYANN_UI_MAIN_WINDOW_H
 
+#include "ui_plot_helpers.h"
+
 #include "app_state.h"
 #include "ui_nuclide_chart.h"
 #include <string>
@@ -95,7 +97,8 @@ private:
   std::string status_message_;
   char isotope_filter_[64];
   char abundance_plot_filter_[64];
-  double abundance_plot_log_floor_;
+  LogPlotFloor abundance_plot_x_floor_{1e-9, 1e-9};
+  LogPlotFloor abundance_plot_y_floor_{1e-99, 1e-99};
   std::vector<int> abundance_plot_isotopes_;
   int isotope_info_index_;
   double isotope_info_rate_;

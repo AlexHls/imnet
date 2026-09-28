@@ -120,8 +120,83 @@ cmake --build build-yann
 ctest --test-dir build-yann --output-on-failure
 ```
 
-The NuPPN configuration currently has no registered CTest tests; use a build
-smoke test plus representative headless runs.
+### Nine-species reference burn (both backends)
+
+`tests/reference_burn.py` compares all 2,362 samples in
+`tests/data/X_reference.npz` at their exact times (no interpolation), mapping
+columns by the names in `species9.txt`. The initial mass fractions are
+p=0.5, he4=0.25, c12=0.25; T=2e8 K and rho=1e4 g/cm³ remain constant.
+
+Enable the test by supplying external runtime data and a Python interpreter
+with NumPy and Matplotlib installed:
+
+```sh
+cmake -S . -B build-nuppn \
+  -DIMNET_NETWORK_BACKEND=NUPPN \
+  -DIMNET_NUPPN_SOURCE_DIR=/path/to/nuppn \
+  -DIMNET_REFERENCE_DATA_DIR=/path/to/nuppn/frames/ppn/run_template \
+  -DPython3_EXECUTABLE=/path/to/python
+cmake --build build-nuppn
+ctest --test-dir build-nuppn -R imnet_reference_burn --output-on-failure
+```
+
+For Yann, configure `build-yann` with `IMNET_NETWORK_BACKEND=YANN`,
+`IMNET_YANN_SOURCE_DIR`, and `IMNET_REFERENCE_DATA_DIR` pointing to a directory
+containing `jinareaclib.dat`, `part.txt`, `mass.txt`, and `lmp_weak_rates.txt`.
+The test supplies its own nine-species `species.txt`.
+
+Each run keeps an isolated input directory under `build-*/reference-burn/run-*`.
+NuPPN input files are copied, both species masks are restricted to the reference
+network, and VITAL reaction overrides are disabled to use the backend's
+REACLIB network. The supplied template's rate-library selection, screening,
+solver settings, and other physics options remain in effect. Its sibling
+`NPDATA` is symlinked for access to the external rate tables.
+External input files and backend sources are not edited by the test.
+
+The test runs the headless executable and a separate `AppState` helper that
+checks cached-step selection, all three flux metrics, sorting, thresholds,
+and regular/weak arrow filters. It also checks species metadata, finite
+nonnegative abundances, mass conservation, CSV/JSON agreement, and expected
+CNO arrow directions. **This covers GUI state APIs, not the window's incremental
+trajectory scheduler or on-screen arrow geometry.**
+
+Every abundance sample must satisfy `abs(X - reference) <= 1e-5 + 0.05*reference`.
+The absolute tolerance keeps tiny trace populations from dominating the
+comparison; the 5% relative tolerance allows modest differences between
+rate libraries. This is a comparability check, not a solver-accuracy target.
+Reference roundoff negatives (down to approximately -1.5e-17) are clipped to
+zero after validation. Failed comparisons return a nonzero exit status and
+still write plots and a worst-error report. Do not widen the tolerance merely
+to make a backend pass: rate sets and physics options need to be reconciled
+when a comparison fails.
+
+Outputs in `build-*/reference-burn/`:
+
+- `abundances.png`: nine log-log panels, reference and both application paths.
+- `errors.png`: worst normalized error across species versus the pass limit.
+- `fluxes.png`: exported heavy-nucleus CNO arrows at roughly 1, 100, and 1,000 s;
+  proton/alpha legs are omitted for readability. This is a diagnostic plot,
+  not a screenshot of imnet.
+- `summary.json`: tolerances, worst discrepancies, and the retained run directory.
+- `run-*`: input files, headless CSV, state JSON files, and process logs.
+
+To run an existing executable directly (without the optional state helper):
+
+```sh
+python tests/reference_burn.py --backend NUPPN \
+  --imnet build-nuppn/src/imnet \
+  --data-dir /path/to/nuppn/frames/ppn/run_template \
+  --output-dir build-nuppn/reference-burn
+```
+
+For manual GUI inspection, launch imnet with `--data-dir` set to the retained
+run's `network` directory. Use File → Load Abundances to load `initial.txt`,
+and File → Load Trajectory to load `trajectory.txt` from that run directory.
+Select Loaded trajectory and Run. Enable flux arrows, browse cached steps,
+and compare the abundance and flux views with the generated plots. The full
+trajectory has 2,362 rows; increase the GUI cache limit when inspecting many
+rows. GUI command-line abundance/trajectory flags currently apply only to
+headless runs, so load these files through the menus.
 
 ## Run the GUI
 
@@ -159,7 +234,10 @@ Useful views:
 - `View -> Trajectory Plot` shows `rho(t)` and `T(t)`.
 - `View -> Abundance Plot` plots selected isotope mass fractions over cached
   time. Isotopes can be added by search or from the selected nuclide. Log axes
-  use a positive floor so zeros do not break plotting.
+  use separate editable `Log x floor (s)` and `Log y floor (X)` bounds.
+  Floors apply when you finish editing; fitting and zooming respect them.
+  `Fit plot` fits the abundance curves; the current-time marker does not affect
+  the limits. Manual axis ranges persist until you request another fit.
 - `View -> Trajectory Editor` edits loaded `time`, `rho`, and `T` rows and can
   save a modified trajectory.
 - `File -> Save State` writes a portable JSON analysis file.

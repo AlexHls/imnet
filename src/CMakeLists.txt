@@ -152,3 +152,40 @@ install(TARGETS imnet
 install(DIRECTORY ${DATA_DIR}/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/imnet/data
 )
+
+# Optional scientific regression: external rate tables and Python plotting
+# packages are supplied by the caller, never downloaded during configuration.
+set(IMNET_REFERENCE_DATA_DIR "" CACHE PATH
+    "Enable reference burn test: Yann rate directory or NuPPN run template")
+if(BUILD_TESTING AND IMNET_REFERENCE_DATA_DIR)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import numpy, matplotlib"
+        RESULT_VARIABLE IMNET_REFERENCE_PYTHON_STATUS)
+    if(NOT IMNET_REFERENCE_PYTHON_STATUS EQUAL 0)
+        message(FATAL_ERROR "Reference burn test needs NumPy and Matplotlib; set Python3_EXECUTABLE")
+    endif()
+    add_executable(imnet_reference_state
+        ${CMAKE_SOURCE_DIR}/tests/reference_burn_state.cpp
+        file_io.cpp app_state.cpp network_wrapper.cpp)
+    target_include_directories(imnet_reference_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(imnet_reference_state PRIVATE libnetwork)
+    if(IMNET_NETWORK_BACKEND STREQUAL "NUPPN")
+        target_compile_definitions(imnet_reference_state PRIVATE IMNET_USE_NUPPN
+            IMNET_NUPPN_RUN_DIR="${IMNET_NUPPN_RUN_DIR}")
+    endif()
+    add_test(NAME imnet_reference_burn
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/reference_burn.py"
+            --imnet $<TARGET_FILE:imnet>
+            --gui-driver $<TARGET_FILE:imnet_reference_state>
+            --backend "${IMNET_NETWORK_BACKEND}"
+            --data-dir "${IMNET_REFERENCE_DATA_DIR}"
+            --output-dir "${CMAKE_BINARY_DIR}/reference-burn")
+    set_tests_properties(imnet_reference_burn PROPERTIES TIMEOUT 600 LABELS "integration;reference")
+endif()
+
+if(BUILD_TESTING)
+    add_executable(imnet_plot_tests ${CMAKE_SOURCE_DIR}/tests/plot_tests.cpp)
+    target_include_directories(imnet_plot_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(imnet_plot_tests PRIVATE implot)
+    add_test(NAME imnet_plot_tests COMMAND imnet_plot_tests)
+endif()
