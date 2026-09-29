@@ -49,6 +49,35 @@ int main() {
     edit_frame();
     require(floor.value == 1e-8, "Scientific-notation edit was not committed");
 
+    double committed = 1.0;
+    const auto number_frame = [&](bool focus = false) {
+      ImGui::NewFrame();
+      ImGui::Begin("Test");
+      if (focus) ImGui::SetKeyboardFocusHere();
+      imyann::input_double_committed("Density", &committed);
+      ImGui::End();
+      ImGui::Render();
+    };
+    number_frame(true);
+    number_frame();
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    io.AddKeyEvent(ImGuiKey_A, true);
+    number_frame();
+    io.AddKeyEvent(ImGuiKey_A, false);
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    io.AddKeyEvent(ImGuiKey_Backspace, true);
+    number_frame();
+    require(committed == 1.0, "Partial numeric edit escaped into simulation state");
+    io.AddKeyEvent(ImGuiKey_Backspace, false);
+    io.AddInputCharactersUTF8("2e-8");
+    number_frame();
+    require(committed == 1.0, "Unfinished scientific notation changed the state");
+    io.AddKeyEvent(ImGuiKey_Enter, true);
+    number_frame();
+    io.AddKeyEvent(ImGuiKey_Enter, false);
+    number_frame();
+    require(committed == 2e-8, "Numeric field did not commit scientific notation");
+
     // Run real ImPlot frames: fitting, a changed floor, manual ranges,
     // and off-screen cursors must not introduce near-zero axis limits.
     for (int frame = 0; frame < 6; ++frame) {

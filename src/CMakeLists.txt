@@ -190,3 +190,13 @@ if(BUILD_TESTING)
     target_link_libraries(imnet_plot_tests PRIVATE implot)
     add_test(NAME imnet_plot_tests COMMAND imnet_plot_tests)
 endif()
+
+# Manual desktop regression: deliberately not registered with headless CTest.
+if(BUILD_TESTING)
+    set(IMNET_GUI_TEST_SOURCES ${IMNET_SOURCES})
+    list(REMOVE_ITEM IMNET_GUI_TEST_SOURCES main.cpp)
+    add_executable(imnet_gui_tests ${CMAKE_SOURCE_DIR}/tests/gui_tests.cpp ${IMNET_GUI_TEST_SOURCES})
+    target_include_directories(imnet_gui_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(imnet_gui_tests PRIVATE $<TARGET_PROPERTY:imnet,COMPILE_DEFINITIONS>)
+    target_link_libraries(imnet_gui_tests PRIVATE libnetwork implot)
+endif()

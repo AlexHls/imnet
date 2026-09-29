@@ -5,8 +5,25 @@
 #include "implot.h"
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
 namespace imyann {
+
+// Only publish numeric edits when Enter is pressed or focus leaves the field.
+// Keeping drafts separate also allows validation to reject an edit safely.
+inline bool input_double_committed(const char *label, double *value,
+                                   double step = 0.0, double step_fast = 0.0,
+                                   const char *format = "%.6e") {
+  static std::unordered_map<ImGuiID, double> drafts;
+  const auto id = ImGui::GetID(label);
+  auto &draft = drafts.try_emplace(id, *value).first->second;
+  ImGui::InputDouble(label, &draft, step, step_fast, format);
+  const bool commit = ImGui::IsItemDeactivatedAfterEdit();
+  const bool changed = commit && std::isfinite(draft) && draft != *value;
+  if (changed) *value = draft;
+  if (!ImGui::IsItemActive()) drafts.erase(id);
+  return changed;
+}
 
 // Keep partial keyboard input separate from the floor used by the plot.
 struct LogPlotFloor {

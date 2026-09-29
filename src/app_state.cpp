@@ -1043,13 +1043,9 @@ double AppState::get_species_rate(int species_index) const {
     return 0.0;
   }
 
-  try {
-    return network_->get_reaction_rate(species_index, integration_settings_.rho,
+  return network_->get_reaction_rate(species_index, integration_settings_.rho,
                                        integration_settings_.temp,
                                        integration_settings_.xnuc);
-  } catch (...) {
-    return 0.0;
-  }
 }
 
 std::vector<ReactionDiagnostic>
@@ -1063,13 +1059,9 @@ AppState::get_species_reaction_diagnostics(int species_index,
     return {};
   }
 
-  try {
-    return network_->get_reaction_diagnostics(
+  return network_->get_reaction_diagnostics(
         species_index, integration_settings_.rho, integration_settings_.temp,
         integration_settings_.xnuc, max_count);
-  } catch (...) {
-    return {};
-  }
 }
 
 std::vector<ReactionFlux>

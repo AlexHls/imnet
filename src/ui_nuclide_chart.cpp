@@ -1,9 +1,11 @@
 #include "ui_nuclide_chart.h"
 #include "ui_theme.h"
+#include "ui_plot_helpers.h"
 #include "imgui.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <set>
 
 namespace imyann {
 
@@ -168,7 +170,7 @@ void NuclideChart::render() {
       ImGui::TableNextColumn();
       ImGui::TextUnformatted("Minimum");
       ImGui::SetNextItemWidth(112.0f);
-      ImGui::InputDouble("##flux_min", &view_settings.flux_threshold, 0.0, 0.0,
+      input_double_committed("##flux_min", &view_settings.flux_threshold, 0.0, 0.0,
                          "%.1e");
       ImGui::TableNextColumn();
       ImGui::TextUnformatted("Arrows/type");
@@ -233,7 +235,7 @@ void NuclideChart::render() {
 
   hovered_isotope_ = -1;
 
-  const float cell = 22.0f * zoom_;
+  const float cell = 32.0f * zoom_;
   const float left_margin = 64.0f;
   const float top_margin = 56.0f;
   const float right_margin = 20.0f;
@@ -309,6 +311,8 @@ void NuclideChart::render() {
     const double linear_span =
         std::max(strongest_flux - view_settings.flux_threshold, 1e-300);
 
+    std::set<std::pair<int, int>> directions;
+    for (const auto &flux : fluxes) directions.emplace(flux.source_index, flux.target_index);
     for (const auto &flux : fluxes) {
       const auto source_it = button_map_.find(flux.source_index);
       const auto target_it = button_map_.find(flux.target_index);
@@ -331,6 +335,11 @@ void NuclideChart::render() {
 
       const float ux = dx / len;
       const float uy = dy / len;
+      if (directions.count({flux.target_index, flux.source_index})) {
+        const float offset = cell * 0.16f;
+        p0.x -= uy * offset; p0.y += ux * offset;
+        p1.x -= uy * offset; p1.y += ux * offset;
+      }
       p0.x += ux * cell * 0.35f;
       p0.y += uy * cell * 0.35f;
       p1.x -= ux * cell * 0.35f;
@@ -369,7 +378,7 @@ void NuclideChart::render() {
     if (contains_mouse && chart_hovered) {
       hovered_isotope_ = btn.index;
       if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        const bool multi_select = ImGui::GetIO().KeyCtrl;
+        const bool multi_select = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
         if (!multi_select) {
           std::fill(selected_.begin(), selected_.end(), false);
         }
@@ -410,9 +419,14 @@ void NuclideChart::render() {
     draw_list->AddRectFilled(p0, p1, fill_col, 2.0f);
     draw_list->AddRect(p0, p1, border_col, 2.0f, 0, is_selected ? 2.0f : 1.0f);
 
-    if (zoom_ >= 1.0f) {
-      draw_list->AddText(ImVec2(p0.x + 2.0f, p0.y + 2.0f),
-                         isotope_text_color(fill), btn.name.c_str());
+    const ImVec2 text_size = ImGui::CalcTextSize(btn.name.c_str());
+    const float scale = std::min(1.0f, (cell - 6.0f) / std::max(text_size.x, 1.0f));
+    const float font_size = ImGui::GetFontSize() * scale;
+    if (font_size >= 8.0f) {
+      draw_list->AddText(ImGui::GetFont(), font_size,
+          ImVec2(x0 + (cell - text_size.x * scale) * 0.5f,
+                 y0 + (cell - text_size.y * scale) * 0.5f),
+          isotope_text_color(fill), btn.name.c_str());
     }
   }
 
@@ -445,10 +459,7 @@ void NuclideChart::render() {
     if (view_settings.flux_color_mode != 0) {
       color = flux_colormap_color(view_settings.flux_colormap,
                                   drawn.color_strength, 0.90f);
-      if (drawn.flux.weak) {
-        color = lerp_color(color, ui_theme::rgb(185, 134, 252, color.w),
-                           0.35f);
-      }
+
     } else {
       const float *source_color = drawn.flux.weak ? view_settings.weak_flux_color
                                                   : view_settings.flux_color;

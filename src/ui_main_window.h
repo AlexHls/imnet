@@ -70,6 +70,7 @@ public:
   GLFWwindow *native_window() { return window_; }
 
 private:
+  friend class MainWindowTest;
   GLFWwindow *window_;
   int width_, height_;
   bool should_close_;
@@ -97,6 +98,10 @@ private:
   std::string status_message_;
   char isotope_filter_[64];
   char abundance_plot_filter_[64];
+  LogPlotFloor trajectory_plot_x_floor_{1e-9, 1e-9};
+  double isotope_info_rho_ = 0.0;
+  double isotope_info_temp_ = 0.0;
+  std::vector<double> isotope_info_xnuc_;
   LogPlotFloor abundance_plot_x_floor_{1e-9, 1e-9};
   LogPlotFloor abundance_plot_y_floor_{1e-99, 1e-99};
   std::vector<int> abundance_plot_isotopes_;
@@ -256,8 +261,8 @@ private:
   /**
    * @brief Apply a simple initial composition preset
    */
-  void apply_composition_preset(const std::vector<std::pair<std::string, double>>
-                                    &composition);
+  void apply_composition_preset(
+      const std::vector<std::pair<std::string, double>> &composition);
 
   /**
    * @brief Select an isotope in app state and chart

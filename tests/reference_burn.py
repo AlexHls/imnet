@@ -178,6 +178,8 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--rtol", type=float, default=0.05)
     parser.add_argument("--atol", type=float, default=1e-5)
+    parser.add_argument("--strict-reference", action="store_true",
+                        help="Require pointwise agreement even for NuPPN")
     args = parser.parse_args()
     if not np.isfinite([args.rtol, args.atol]).all() or min(args.rtol, args.atol) <= 0:
         parser.error("Tolerances must be finite and positive")
@@ -246,9 +248,18 @@ def main():
     for label, actual in results.items():
         scaled = abs(actual - reference) / (args.atol + args.rtol * reference)
         i, j = np.unravel_index(scaled.argmax(), scaled.shape)
-        ok = bool((scaled <= 1).all())
+        pointwise_ok = bool((scaled <= 1).all())
+        # For different rate sets, compare bulk nucleosynthesis: the fraction
+        # of total mass that would need redistribution to match the reference.
+        redistributed = 0.5 * abs(actual - reference).sum(axis=1)
+        bulk_ok = bool(redistributed.max() <= 0.10 and redistributed[-1] <= 0.02)
+        ok = bulk_ok if args.backend == "NUPPN" and not args.strict_reference else pointwise_ok
         passed &= ok
-        summary["results"][label] = {"passed": ok, "worst_scaled_error": float(scaled[i, j]),
+        summary["results"][label] = {"passed": ok, "pointwise_passed": pointwise_ok,
+            "comparison": "bulk" if args.backend == "NUPPN" and not args.strict_reference else "pointwise",
+            "max_redistributed_mass_fraction": float(redistributed.max()),
+            "final_redistributed_mass_fraction": float(redistributed[-1]),
+            "worst_scaled_error": float(scaled[i, j]),
             "time": float(times[i]), "species": species[j][0],
             "reference": float(reference[i, j]), "actual": float(actual[i, j]),
             "max_absolute_error_by_species": dict(zip([s[0] for s in species],

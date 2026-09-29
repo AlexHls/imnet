@@ -14,6 +14,7 @@
 #include "implot.h"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -34,10 +35,9 @@ static TrajectoryStepCache make_trajectory_step_cache(
   step.time = times[index];
   step.rho = rhos[index];
   step.temp = temps[index];
-  step.dt =
-      (index + 1 < times.size()) ? std::max(times[index + 1] - times[index],
-                                            0.0)
-                                 : 0.0;
+  step.dt = (index + 1 < times.size())
+                ? std::max(times[index + 1] - times[index], 0.0)
+                : 0.0;
   step.dedt = dedt;
   step.substeps = substeps;
   step.success = success;
@@ -47,8 +47,9 @@ static TrajectoryStepCache make_trajectory_step_cache(
   return step;
 }
 
-static void upsert_trajectory_cache_step(
-    std::vector<TrajectoryStepCache> &cache, const TrajectoryStepCache &step) {
+static void
+upsert_trajectory_cache_step(std::vector<TrajectoryStepCache> &cache,
+                             const TrajectoryStepCache &step) {
   auto it = std::find_if(cache.begin(), cache.end(),
                          [&step](const TrajectoryStepCache &cached) {
                            return cached.index == step.index;
@@ -73,6 +74,35 @@ static void prune_trajectory_cache(std::vector<TrajectoryStepCache> &cache,
               cache.end());
 }
 
+// Confirm replacement at the button, so every GUI export has the same behavior.
+static bool save_button(const char *label, const char *path, ImVec2 size) {
+  ImGui::PushID(label);
+  bool save = false;
+  ImGui::BeginDisabled(!path[0]);
+  if (ImGui::Button(label, size)) {
+    std::error_code error;
+    if (std::filesystem::exists(path, error))
+      ImGui::OpenPopup("Replace file?");
+    else
+      save = true;
+  }
+  ImGui::EndDisabled();
+  if (ImGui::BeginPopupModal("Replace file?", nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextWrapped("Replace the existing file?\n%s", path);
+    if (ImGui::Button("Replace", ImVec2(120, 0))) {
+      save = true;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120, 0)))
+      ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+  }
+  ImGui::PopID();
+  return save;
+}
+
 static void glfw_error_callback(int error, const char *description) {
   std::cerr << "GLFW Error " << error << ": " << description << std::endl;
 }
@@ -91,12 +121,11 @@ MainWindow::MainWindow(int width, int height, const std::string &title)
       abundance_plot_log_x_(false), abundance_plot_log_y_(false),
       abundance_plot_legend_(true), normalize_before_integrate_(false),
       show_all_abundances_(true), show_nonzero_only_(false), run_mode_(0),
-      composition_preset_index_(0), last_dedt_(0.0),
-      status_message_("Ready"), isotope_info_index_(-1),
-      isotope_info_rate_(0.0), chart_initialized_(false),
-      show_load_abund_popup_(false), show_save_abund_popup_(false),
-      show_save_state_popup_(false), show_load_traj_popup_(false),
-      show_open_species_popup_(false),
+      composition_preset_index_(0), last_dedt_(0.0), status_message_("Ready"),
+      isotope_info_index_(-1), isotope_info_rate_(0.0),
+      chart_initialized_(false), show_load_abund_popup_(false),
+      show_save_abund_popup_(false), show_save_state_popup_(false),
+      show_load_traj_popup_(false), show_open_species_popup_(false),
 #ifndef IMNET_USE_NUPPN
       show_open_rates_popup_(false), trajectory_step_ui_(0),
 #else
@@ -254,7 +283,15 @@ void MainWindow::process_frame() {
     return;
   }
 
-  process_trajectory_integration_job();
+  // Bound batches by wall time so cheap intervals do not cost a whole frame
+  // each.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(8);
+  for (int i = 0; i < 32 && trajectory_job_.active; ++i) {
+    process_trajectory_integration_job();
+    if (std::chrono::steady_clock::now() >= deadline)
+      break;
+  }
 
   // Start ImGui frame
   ImGui_ImplOpenGL3_NewFrame();
@@ -287,10 +324,17 @@ void MainWindow::process_frame() {
 
 void MainWindow::render_menu_bar() {
   const auto shortcut = [](ImGuiKeyChord chord) {
+#ifdef __APPLE__
+    if (ImGui::Shortcut((chord & ~ImGuiMod_Ctrl) | ImGuiMod_Super,
+                        ImGuiInputFlags_RouteGlobal))
+      return true;
+#endif
     return ImGui::Shortcut(chord, ImGuiInputFlags_RouteGlobal);
   };
-  if (shortcut(ImGuiMod_Ctrl | ImGuiKey_Q)) request_close();
-  if (shortcut(ImGuiMod_Ctrl | ImGuiKey_S)) show_save_state_popup_ = true;
+  if (shortcut(ImGuiMod_Ctrl | ImGuiKey_Q))
+    request_close();
+  if (shortcut(ImGuiMod_Ctrl | ImGuiKey_S))
+    show_save_state_popup_ = true;
   if (shortcut(ImGuiMod_Ctrl | ImGuiKey_O)) {
     sync_network_path_inputs();
 #ifdef IMNET_USE_NUPPN
@@ -305,19 +349,25 @@ void MainWindow::render_menu_bar() {
     show_open_species_popup_ = true;
   }
 #endif
+#ifdef __APPLE__
+  const std::string key_prefix = "Cmd+";
+#else
+  const std::string key_prefix = "Ctrl+";
+#endif
   if (ImGui::BeginMainMenuBar()) {
     if (ImGui::BeginMenu("File")) {
 #ifdef IMNET_USE_NUPPN
-      if (ImGui::MenuItem("Open NuPPN Run Directory", "Ctrl+O")) {
+      if (ImGui::MenuItem("Open NuPPN Run Directory",
+                          (key_prefix + "O").c_str())) {
         sync_network_path_inputs();
         show_open_species_popup_ = true;
       }
 #else
-      if (ImGui::MenuItem("Open Rate Files", "Ctrl+O")) {
+      if (ImGui::MenuItem("Open Rate Files", (key_prefix + "O").c_str())) {
         sync_network_path_inputs();
         show_open_rates_popup_ = true;
       }
-      if (ImGui::MenuItem("Open Species", "Ctrl+Shift+O")) {
+      if (ImGui::MenuItem("Open Species", (key_prefix + "Shift+O").c_str())) {
         sync_network_path_inputs();
         show_open_species_popup_ = true;
       }
@@ -329,14 +379,14 @@ void MainWindow::render_menu_bar() {
       if (ImGui::MenuItem("Save Abundances")) {
         show_save_abund_popup_ = true;
       }
-      if (ImGui::MenuItem("Save State", "Ctrl+S")) {
+      if (ImGui::MenuItem("Save State", (key_prefix + "S").c_str())) {
         show_save_state_popup_ = true;
       }
       if (ImGui::MenuItem("Load Trajectory")) {
         show_load_traj_popup_ = true;
       }
       ImGui::Separator();
-      if (ImGui::MenuItem("Exit", "Ctrl+Q")) {
+      if (ImGui::MenuItem("Exit", (key_prefix + "Q").c_str())) {
         request_close();
       }
       ImGui::EndMenu();
@@ -350,6 +400,10 @@ void MainWindow::render_menu_bar() {
       ImGui::MenuItem("Abundance Plot", nullptr, &show_abundance_plot_);
       ImGui::MenuItem("Trajectory Editor", nullptr, &show_trajectory_editor_);
       ImGui::MenuItem("Settings", nullptr, &show_settings_);
+      ImGui::Separator();
+      ImGui::SetNextItemWidth(160.0f);
+      ImGui::SliderFloat("Text size", &ImGui::GetIO().FontGlobalScale, 1.0f,
+                         1.8f, "%.1fx");
       ImGui::EndMenu();
     }
 
@@ -460,7 +514,8 @@ void MainWindow::render_docking_layout() {
     ImGui::SetNextWindowPos(
         ImVec2(viewport->WorkPos.x, viewport->WorkPos.y + 450),
         ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(300, 100), ImVec2(FLT_MAX, 300));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(300, 100),
+                                        ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("Isotope Information", &show_isotope_info_);
     if (!app_state_ || !chart_initialized_) {
       ImGui::TextDisabled("No isotope selected.");
@@ -468,7 +523,10 @@ void MainWindow::render_docking_layout() {
       int idx = nuclide_chart_.get_single_selected_isotope();
 
       if (idx >= 0 && idx < app_state_->num_species()) {
-        if (idx != isotope_info_index_) {
+        const auto &current = app_state_->integration_settings();
+        if (idx != isotope_info_index_ || current.rho != isotope_info_rho_ ||
+            current.temp != isotope_info_temp_ ||
+            current.xnuc != isotope_info_xnuc_) {
           refresh_isotope_diagnostics(idx);
         }
         const auto &names = app_state_->get_species_names();
@@ -489,11 +547,14 @@ void MainWindow::render_docking_layout() {
         ImGui::Text("Species: %s", names[idx].c_str());
         ImGui::Text("Index: %d", idx);
         ImGui::Text("X: %.6e", x);
-        ImGui::Text("Net dX/dt: %.6e 1/s", isotope_info_rate_);
+        if (isotope_info_error_.empty())
+          ImGui::Text("Net dX/dt: %.6e 1/s", isotope_info_rate_);
+        else
+          ImGui::TextDisabled("Net dX/dt unavailable");
         ImGui::Text("rho = %.6e g/cm^3", settings.rho);
         ImGui::Text("T   = %.6e K", settings.temp);
         ImGui::Text("dt  = %.6e s", settings.dt);
-        ImGui::Text("Flags: active=%s, fixed=%s, selected=%s",
+        ImGui::Text("Chart seed=%s, normalization lock=%s, selected=%s",
                     active ? "true" : "false", fixed ? "true" : "false",
                     selected ? "true" : "false");
         ImGui::Separator();
@@ -594,7 +655,8 @@ void MainWindow::render_docking_layout() {
                                         ImVec2(FLT_MAX, FLT_MAX));
     ImGui::Begin("About / Settings", &show_settings_);
     ImGui::TextWrapped("imnet v%s", IMNET_VERSION);
-    ImGui::TextWrapped("Interactive %s Nuclear Network", Network::backend_name());
+    ImGui::TextWrapped("Interactive %s Nuclear Network",
+                       Network::backend_name());
     ImGui::Separator();
     ImGui::TextWrapped("Built with:");
     ImGui::BulletText("%s network backend", Network::backend_name());
@@ -624,7 +686,8 @@ void MainWindow::render_docking_layout() {
       ImGui::TextWrapped("Input edits take effect after restarting imnet.");
       if (!nuppn_inputs_loaded_) {
         ImGui::TextColored(ui_theme::danger(),
-                           "Input file missing or too large for the editor; saving is disabled.");
+                           "Input file missing or too large for the editor; "
+                           "saving is disabled.");
       }
       ImGui::TextWrapped("ppn_frame.input");
       ImGui::InputTextMultiline("##nuppn_frame_input", nuppn_frame_input_,
@@ -661,8 +724,7 @@ void MainWindow::render_docking_layout() {
 void MainWindow::render_single_step_controls() {
   auto &settings = app_state_->integration_settings();
 
-  if (ImGui::CollapsingHeader("Run Setup",
-                              ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::CollapsingHeader("Run Setup", ImGuiTreeNodeFlags_DefaultOpen)) {
     if (ImGui::BeginTabBar("SingleStepTabs")) {
       if (ImGui::BeginTabItem("Conditions")) {
         constexpr float condition_input_width = 240.0f;
@@ -674,14 +736,17 @@ void MainWindow::render_single_step_controls() {
             static_cast<float>(std::log10(std::max(settings.dt, 1e-300)));
 
         ImGui::TextWrapped("Physical Conditions");
+        if (app_state_->has_trajectory())
+          ImGui::TextWrapped(
+              "Trajectory runs use the conditions in each loaded row.");
         ImGui::SetNextItemWidth(condition_input_width);
         if (ImGui::SliderFloat("log10(rho)##single", &log_rho, -2.0f, 12.0f,
                                "%.3f")) {
           settings.rho = std::pow(10.0, static_cast<double>(log_rho));
         }
         ImGui::SetNextItemWidth(condition_input_width);
-        if (ImGui::InputDouble("rho (g/cm^3)", &settings.rho, 0.0, 0.0,
-                               "%.9e")) {
+        if (input_double_committed("rho (g/cm^3)", &settings.rho, 0.0, 0.0,
+                                   "%.9e")) {
           settings.rho = std::max(settings.rho, 0.0);
         }
 
@@ -691,7 +756,7 @@ void MainWindow::render_single_step_controls() {
           settings.temp = std::pow(10.0, static_cast<double>(log_temp));
         }
         ImGui::SetNextItemWidth(condition_input_width);
-        if (ImGui::InputDouble("T (K)", &settings.temp, 0.0, 0.0, "%.9e")) {
+        if (input_double_committed("T (K)", &settings.temp, 0.0, 0.0, "%.9e")) {
           settings.temp = std::max(settings.temp, 0.0);
         }
 
@@ -701,25 +766,25 @@ void MainWindow::render_single_step_controls() {
           settings.dt = std::pow(10.0, static_cast<double>(log_dt));
         }
         ImGui::SetNextItemWidth(condition_input_width);
-        if (ImGui::InputDouble("dt (s)", &settings.dt, 0.0, 0.0, "%.9e")) {
+        if (input_double_committed("dt (s)", &settings.dt, 0.0, 0.0, "%.9e")) {
           settings.dt = std::max(settings.dt, 0.0);
         }
 
         ImGui::Separator();
         ImGui::TextWrapped("Final-Time Mode");
         ImGui::SetNextItemWidth(condition_input_width);
-        if (ImGui::InputDouble("final time (s)", &settings.final_time, 0.0,
-                               0.0, "%.9e")) {
+        if (input_double_committed("final time (s)", &settings.final_time, 0.0,
+                                   0.0, "%.9e")) {
           settings.final_time = std::max(settings.final_time, 0.0);
         }
         ImGui::SetNextItemWidth(condition_input_width);
-        if (ImGui::InputDouble("dt max (s)", &settings.dt_max, 0.0, 0.0,
-                               "%.9e")) {
+        if (input_double_committed("dt max (s)", &settings.dt_max, 0.0, 0.0,
+                                   "%.9e")) {
           settings.dt_max = std::max(settings.dt_max, 0.0);
         }
         ImGui::SetNextItemWidth(condition_input_width);
-        if (ImGui::InputDouble("dt factor", &settings.dt_factor, 0.0, 0.0,
-                               "%.6g")) {
+        if (input_double_committed("dt factor", &settings.dt_factor, 0.0, 0.0,
+                                   "%.6g")) {
           settings.dt_factor = std::max(settings.dt_factor, 0.0);
         }
         ImGui::SetNextItemWidth(condition_input_width);
@@ -767,7 +832,7 @@ void MainWindow::render_single_step_controls() {
             cancel_trajectory_integration_job();
             status_message_ = "Single-step integration completed";
             refresh_selected_isotope();
-            ImGui::OpenPopup("Integration Result");
+
           } else {
             status_message_ = "Integration failed: " + error;
           }
@@ -787,9 +852,8 @@ void MainWindow::render_single_step_controls() {
                 app_state_->get_network()
                     ? app_state_->get_network()->last_substeps()
                     : 0;
-            status_message_ =
-                "Final-time integration completed, substeps: " +
-                std::to_string(substeps);
+            status_message_ = "Final-time integration completed, substeps: " +
+                              std::to_string(substeps);
             refresh_selected_isotope();
           } else {
             status_message_ = "Final-time integration failed: " + error;
@@ -801,13 +865,22 @@ void MainWindow::render_single_step_controls() {
         ImGui::Combo("##run_mode", &run_mode_, run_modes,
                      IM_ARRAYSIZE(run_modes));
         ImGui::Checkbox("Normalize before run", &normalize_before_integrate_);
+        if (run_mode_ == 0)
+          ImGui::TextWrapped("Advances by dt. Use Final time to record a "
+                             "plottable burn history.");
+        if (run_mode_ == 1)
+          ImGui::TextWrapped("Runs synchronously; the window may pause until "
+                             "the solver finishes.");
 
         if (trajectory_job_.active) {
           if (ImGui::Button("Cancel Trajectory Run", ImVec2(-1.0f, 0))) {
             cancel_trajectory_integration_job();
           }
         } else {
-          const bool can_run = run_mode_ != 2 || app_state_->has_trajectory();
+          std::string run_error;
+          const bool can_run =
+              (run_mode_ != 2 || app_state_->has_trajectory()) &&
+              app_state_->validate_integration_settings(run_error);
           ImGui::BeginDisabled(!can_run);
           if (ImGui::Button("Run", ImVec2(-1.0f, 0))) {
             if (run_mode_ == 0) {
@@ -819,6 +892,8 @@ void MainWindow::render_single_step_controls() {
             }
           }
           ImGui::EndDisabled();
+          if (!run_error.empty())
+            ImGui::TextWrapped("%s", run_error.c_str());
         }
 
         if (run_mode_ == 2 && !app_state_->has_trajectory()) {
@@ -828,11 +903,15 @@ void MainWindow::render_single_step_controls() {
         }
 
         ImGui::Separator();
-        ImGui::Text("Last dE/dt %.9e erg/g/s", last_dedt_);
+        const auto *current = app_state_->get_trajectory_cache_step(
+            app_state_->current_trajectory_step());
+        ImGui::Text("Time %.9e s", app_state_->current_time());
+        ImGui::Text("dE/dt %.9e erg/g/s", current ? current->dedt : last_dedt_);
         ImGui::Text("Last substeps %d",
-                    app_state_->get_network()
-                        ? app_state_->get_network()->last_substeps()
-                        : 0);
+                    current ? current->substeps
+                            : (app_state_->get_network()
+                                   ? app_state_->get_network()->last_substeps()
+                                   : 0));
 
         ImGui::Separator();
         ImGui::TextWrapped("Composition");
@@ -871,10 +950,9 @@ void MainWindow::render_single_step_controls() {
           }
         }
 
-        const float half_button_width =
-            (ImGui::GetContentRegionAvail().x -
-             ImGui::GetStyle().ItemSpacing.x) *
-            0.5f;
+        const float half_button_width = (ImGui::GetContentRegionAvail().x -
+                                         ImGui::GetStyle().ItemSpacing.x) *
+                                        0.5f;
         if (ImGui::Button("Normalize", ImVec2(half_button_width, 0))) {
           if (app_state_->normalize_abundances()) {
             cancel_trajectory_integration_job();
@@ -911,7 +989,17 @@ void MainWindow::render_composition_editor() {
   auto &settings = app_state_->integration_settings();
   const auto &species_names = app_state_->get_species_names();
 
-  ImGui::TextWrapped("Active controls chart connectivity only. Fixed locks normalization, not burning.");
+  ImGui::TextWrapped(
+      "Chart seed selects connected isotopes. Lock X preserves a value during "
+      "normalization only; burning can change it.");
+  double sum = 0.0;
+  for (double x : settings.xnuc)
+    sum += x;
+  ImGui::Text("Total mass fraction: %.9g", sum);
+  if (!std::isfinite(sum) || std::abs(sum - 1.0) > 1e-6)
+    ImGui::TextColored(
+        ui_theme::warning(),
+        "Mass fractions do not sum to one. Normalize before running.");
   ImGui::Checkbox("Show all isotopes", &show_all_abundances_);
   ImGui::SameLine();
   ImGui::Checkbox("Nonzero only", &show_nonzero_only_);
@@ -934,8 +1022,8 @@ void MainWindow::render_composition_editor() {
   if (ImGui::BeginTable("CompositionTable", 5, flags, ImVec2(0, 300))) {
     ImGui::TableSetupColumn("Iso");
     ImGui::TableSetupColumn("X");
-    ImGui::TableSetupColumn("Active");
-    ImGui::TableSetupColumn("Fixed");
+    ImGui::TableSetupColumn("Chart seed");
+    ImGui::TableSetupColumn("Lock X");
     ImGui::TableSetupColumn("Select");
     ImGui::TableHeadersRow();
 
@@ -959,14 +1047,14 @@ void MainWindow::render_composition_editor() {
       ImGui::TableSetColumnIndex(0);
       if (ImGui::Selectable((name + "##row_" + std::to_string(i)).c_str(),
                             settings.selected[i])) {
-        select_isotope(i, ImGui::GetIO().KeyCtrl);
+        select_isotope(i, ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper);
       }
 
       ImGui::TableSetColumnIndex(1);
       ImGui::SetNextItemWidth(-1.0f);
       double x = settings.xnuc[i];
-      if (ImGui::InputDouble(("##x_" + std::to_string(i)).c_str(), &x, 0.0, 0.0,
-                             "%.6e")) {
+      if (input_double_committed(("##x_" + std::to_string(i)).c_str(), &x, 0.0,
+                                 0.0, "%.6e")) {
         settings.xnuc[i] = std::isfinite(x) ? std::max(0.0, x) : 0.0;
         composition_changed();
       }
@@ -1026,13 +1114,24 @@ void MainWindow::render_trajectory_controls() {
   ImGui::TextDisabled("cached %d / max %d", static_cast<int>(cache.size()),
                       app_state_->view_settings().max_cached_trajectory_steps);
 
+  if (ImGui::Button("Cache full trajectory")) {
+    app_state_->view_settings().max_cached_trajectory_steps =
+        static_cast<int>(loaded_steps);
+    if (trajectory_job_.initial_xnuc.empty() || trajectory_job_.failed)
+      start_trajectory_integration_job();
+    else
+      retarget_trajectory_integration_job();
+  }
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip(
+        "Integrate and retain every row for plotting and browsing.");
+
   if (trajectory_job_.active || trajectory_job_.complete ||
       trajectory_job_.failed) {
     const float denominator =
-        loaded_steps > 1 ? static_cast<float>(loaded_steps - 1) : 1.0f;
-    const float progress =
-        std::min(static_cast<float>(trajectory_job_.current_step) / denominator,
-                 1.0f);
+        std::max(1.0f, static_cast<float>(trajectory_job_.target_end_step));
+    const float progress = std::min(
+        static_cast<float>(trajectory_job_.current_step) / denominator, 1.0f);
     ImGui::ProgressBar(progress, ImVec2(-1.0f, 0.0f));
     ImGui::Text("Integrated through step %d of %d",
                 static_cast<int>(trajectory_job_.current_step),
@@ -1044,8 +1143,7 @@ void MainWindow::render_trajectory_controls() {
       ImGui::TextColored(ui_theme::danger(), "%s",
                          trajectory_job_.error.c_str());
     } else if (trajectory_job_.complete) {
-      ImGui::TextColored(ui_theme::success(),
-                         "Current cache window is ready.");
+      ImGui::TextColored(ui_theme::success(), "Current cache window is ready.");
     }
   }
 
@@ -1073,6 +1171,16 @@ void MainWindow::render_trajectory_controls() {
     apply_step();
   }
   ImGui::EndDisabled();
+  ImGui::SameLine();
+  if (ImGui::Button("First")) {
+    trajectory_step_ui_ = 0;
+    apply_step();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Last")) {
+    trajectory_step_ui_ = max_available_step;
+    apply_step();
+  }
 
   ImGui::SetNextItemWidth(-1.0f);
   if (ImGui::SliderInt("##trajectory_step_slider", &trajectory_step_ui_, 0,
@@ -1108,8 +1216,7 @@ void MainWindow::render_trajectory_controls() {
   ImGui::Text("substeps = %d", step->substeps);
   ImGui::Text("status = %s", step->status.c_str());
   if (!step->success && !step->error.empty()) {
-    ImGui::TextColored(ui_theme::danger(), "%s",
-                       step->error.c_str());
+    ImGui::TextColored(ui_theme::danger(), "%s", step->error.c_str());
   }
 
   if (!cache.empty() &&
@@ -1152,13 +1259,13 @@ void MainWindow::render_trajectory_controls() {
       if (cached.success) {
         ImGui::Text("%s", cached.status.c_str());
       } else {
-        ImGui::TextColored(ui_theme::danger(), "%s",
-                           cached.status.c_str());
+        ImGui::TextColored(ui_theme::danger(), "%s", cached.status.c_str());
       }
     }
 
     ImGui::EndTable();
-    if (selection_changed) apply_step();
+    if (selection_changed)
+      apply_step();
   }
 }
 
@@ -1218,10 +1325,11 @@ void MainWindow::retarget_trajectory_integration_job() {
     start = end + 1 - max_cached_steps;
   }
 
-  const bool needs_restart =
-      trajectory_job_.xnuc.empty() || end < trajectory_job_.current_step ||
-      (start < trajectory_job_.current_step &&
-       (trajectory_job_.cache.empty() || trajectory_job_.cache.front().index > start));
+  const bool needs_restart = trajectory_job_.xnuc.empty() ||
+                             end < trajectory_job_.current_step ||
+                             (start < trajectory_job_.current_step &&
+                              (trajectory_job_.cache.empty() ||
+                               trajectory_job_.cache.front().index > start));
   if (needs_restart) {
     trajectory_job_.current_step = 0;
     trajectory_job_.xnuc = trajectory_job_.initial_xnuc;
@@ -1271,8 +1379,8 @@ void MainWindow::process_trajectory_integration_job() {
     trajectory_job_.complete = true;
     app_state_->set_trajectory_cache(
         trajectory_job_.cache,
-        static_cast<size_t>(std::clamp(
-            trajectory_step_ui_, 0, static_cast<int>(loaded_steps - 1))));
+        static_cast<size_t>(std::clamp(trajectory_step_ui_, 0,
+                                       static_cast<int>(loaded_steps - 1))));
     return;
   }
 
@@ -1314,14 +1422,13 @@ void MainWindow::process_trajectory_integration_job() {
           trajectory_job_.cache,
           make_trajectory_step_cache(i + 1, times, rhos, temps,
                                      trajectory_job_.xnuc, dedt, substeps,
-                                     false,
-                                     "failed", trajectory_job_.error));
+                                     false, "failed", trajectory_job_.error));
     }
     status_message_ = "Trajectory integration failed: " + trajectory_job_.error;
     app_state_->set_trajectory_cache(
         trajectory_job_.cache,
-        static_cast<size_t>(std::clamp(
-            trajectory_step_ui_, 0, static_cast<int>(loaded_steps - 1))));
+        static_cast<size_t>(std::clamp(trajectory_step_ui_, 0,
+                                       static_cast<int>(loaded_steps - 1))));
     return;
   }
 
@@ -1332,15 +1439,14 @@ void MainWindow::process_trajectory_integration_job() {
         trajectory_job_.cache,
         make_trajectory_step_cache(trajectory_job_.current_step, times, rhos,
                                    temps, trajectory_job_.xnuc, dedt, substeps,
-                                   true,
-                                   "ok", ""));
+                                   true, "ok", ""));
   }
   prune_trajectory_cache(trajectory_job_.cache,
                          trajectory_job_.cache_start_step,
                          trajectory_job_.cache_end_step);
 
-  const size_t selected_step = static_cast<size_t>(std::clamp(
-      trajectory_step_ui_, 0, static_cast<int>(loaded_steps - 1)));
+  const size_t selected_step = static_cast<size_t>(
+      std::clamp(trajectory_step_ui_, 0, static_cast<int>(loaded_steps - 1)));
   app_state_->set_trajectory_cache(trajectory_job_.cache, selected_step);
 
   if (trajectory_job_.current_step >= trajectory_job_.target_end_step) {
@@ -1378,8 +1484,8 @@ void MainWindow::render_trajectory_plot_panel() {
   const auto &times = app_state_->trajectory_times();
   const auto &rhos = app_state_->trajectory_rhos();
   const auto &temps = app_state_->trajectory_temps();
-  const int count = static_cast<int>(
-      std::min({times.size(), rhos.size(), temps.size()}));
+  const int count =
+      static_cast<int>(std::min({times.size(), rhos.size(), temps.size()}));
 
   if (count <= 0) {
     ImGui::TextDisabled("No trajectory samples available.");
@@ -1390,8 +1496,6 @@ void MainWindow::render_trajectory_plot_panel() {
   const size_t current_index =
       std::min(app_state_->current_trajectory_step(), times.size() - 1);
   const double current_time = times[current_index];
-  const bool can_use_log_x =
-      std::all_of(times.begin(), times.end(), [](double t) { return t > 0.0; });
 
   ImGui::Text("Samples: %d", count);
   ImGui::SameLine();
@@ -1401,34 +1505,44 @@ void MainWindow::render_trajectory_plot_panel() {
   fit_plot |= ImGui::Checkbox("Log y", &trajectory_plot_log_y_);
   ImGui::SameLine();
   fit_plot |= ImGui::Button("Fit plot");
-  if (trajectory_plot_log_x_ && !can_use_log_x) {
-    ImGui::TextDisabled("Log x requires all trajectory times to be positive.");
+  if (trajectory_plot_log_x_) {
+    fit_plot |= trajectory_plot_x_floor_.draw("Time floor (s)");
+    ImGui::TextDisabled("Times below the floor are displayed at the floor.");
+  }
+  std::vector<double> plot_times(times.begin(), times.end());
+  if (trajectory_plot_log_x_) {
+    for (auto &t : plot_times)
+      t = std::max(t, trajectory_plot_x_floor_.value);
   }
 
-  if (fit_plot) ImPlot::SetNextAxesToFit();
+  if (fit_plot)
+    ImPlot::SetNextAxesToFit();
   if (ImPlot::BeginPlot("rho(t)##trajectory_rho", ImVec2(-1, 220))) {
     ImPlot::SetupAxes("t (s)", "rho (g/cm^3)");
-    if (trajectory_plot_log_x_ && can_use_log_x) {
-      setup_log_plot_axis(ImAxis_X1, *std::min_element(times.begin(), times.end()));
+    if (trajectory_plot_log_x_) {
+      setup_log_plot_axis(ImAxis_X1, trajectory_plot_x_floor_.value);
     }
     if (trajectory_plot_log_y_) {
-      setup_log_plot_axis(ImAxis_Y1, *std::min_element(rhos.begin(), rhos.end()));
+      setup_log_plot_axis(ImAxis_Y1,
+                          *std::min_element(rhos.begin(), rhos.end()));
     }
-    ImPlot::PlotLine("rho", times.data(), rhos.data(), count);
+    ImPlot::PlotLine("rho", plot_times.data(), rhos.data(), count);
     plot_current_time("current step", current_time);
     ImPlot::EndPlot();
   }
 
-  if (fit_plot) ImPlot::SetNextAxesToFit();
+  if (fit_plot)
+    ImPlot::SetNextAxesToFit();
   if (ImPlot::BeginPlot("T(t)##trajectory_temp", ImVec2(-1, 220))) {
     ImPlot::SetupAxes("t (s)", "T (K)");
-    if (trajectory_plot_log_x_ && can_use_log_x) {
-      setup_log_plot_axis(ImAxis_X1, *std::min_element(times.begin(), times.end()));
+    if (trajectory_plot_log_x_) {
+      setup_log_plot_axis(ImAxis_X1, trajectory_plot_x_floor_.value);
     }
     if (trajectory_plot_log_y_) {
-      setup_log_plot_axis(ImAxis_Y1, *std::min_element(temps.begin(), temps.end()));
+      setup_log_plot_axis(ImAxis_Y1,
+                          *std::min_element(temps.begin(), temps.end()));
     }
-    ImPlot::PlotLine("T", times.data(), temps.data(), count);
+    ImPlot::PlotLine("T", plot_times.data(), temps.data(), count);
     plot_current_time("current step", current_time);
     ImPlot::EndPlot();
   }
@@ -1461,12 +1575,11 @@ void MainWindow::render_abundance_plot_panel() {
   const auto &cache = app_state_->trajectory_cache();
   const auto &species_names = app_state_->get_species_names();
   abundance_plot_isotopes_.erase(
-      std::remove_if(abundance_plot_isotopes_.begin(),
-                     abundance_plot_isotopes_.end(),
-                     [&species_names](int index) {
-                       return index < 0 ||
-                              index >= static_cast<int>(species_names.size());
-                     }),
+      std::remove_if(
+          abundance_plot_isotopes_.begin(), abundance_plot_isotopes_.end(),
+          [&species_names](int index) {
+            return index < 0 || index >= static_cast<int>(species_names.size());
+          }),
       abundance_plot_isotopes_.end());
 
   std::string filter = abundance_plot_filter_;
@@ -1515,10 +1628,9 @@ void MainWindow::render_abundance_plot_panel() {
                     index) != abundance_plot_isotopes_.end();
       ImGui::TableNextRow();
       ImGui::TableSetColumnIndex(0);
-      if (ImGui::Selectable((species_names[i] + "##abund_match_" +
-                             std::to_string(i))
-                                .c_str(),
-                            false) &&
+      if (ImGui::Selectable(
+              (species_names[i] + "##abund_match_" + std::to_string(i)).c_str(),
+              false) &&
           !already_selected) {
         abundance_plot_isotopes_.push_back(index);
       }
@@ -1533,7 +1645,8 @@ void MainWindow::render_abundance_plot_panel() {
     ImGui::EndTable();
   }
 
-  if (!abundance_plot_isotopes_.empty()) {
+  if (!abundance_plot_isotopes_.empty() &&
+      ImGui::CollapsingHeader("Plotted isotopes")) {
     ImGui::Text("Isotopes: %d",
                 static_cast<int>(abundance_plot_isotopes_.size()));
     for (size_t i = 0; i < abundance_plot_isotopes_.size();) {
@@ -1587,9 +1700,12 @@ void MainWindow::render_abundance_plot_panel() {
 
   const ImPlotFlags plot_flags =
       abundance_plot_legend_ ? ImPlotFlags_None : ImPlotFlags_NoLegend;
-  if (fit_plot) ImPlot::SetNextAxesToFit();
-  if (ImPlot::BeginPlot("X(t)##abundance_evolution", ImVec2(-1, 330),
-                        plot_flags)) {
+  if (fit_plot)
+    ImPlot::SetNextAxesToFit();
+  if (ImPlot::BeginPlot(
+          "X(t)##abundance_evolution",
+          ImVec2(-1, std::max(220.0f, ImGui::GetContentRegionAvail().y)),
+          plot_flags)) {
     // Fit on first display; retain user limits on subsequent frames.
     ImPlot::SetupAxes("t (s)", "X");
     if (abundance_plot_log_x_) {
@@ -1628,9 +1744,8 @@ void MainWindow::render_abundance_plot_panel() {
       }
     }
 
-    if (const auto *current =
-            app_state_->get_trajectory_cache_step(
-                app_state_->current_trajectory_step())) {
+    if (const auto *current = app_state_->get_trajectory_cache_step(
+            app_state_->current_trajectory_step())) {
       plot_current_time("current", current->time);
     }
     ImPlot::EndPlot();
@@ -1698,57 +1813,62 @@ void MainWindow::render_trajectory_editor_panel() {
     ImGui::TableSetupColumn("T (K)");
     ImGui::TableHeadersRow();
 
-    for (int row = 0; row < row_count; ++row) {
-      ImGui::TableNextRow();
-      ImGui::TableSetColumnIndex(0);
-      if (ImGui::Selectable((std::to_string(row) + "##traj_edit_select_" +
-                             std::to_string(row))
-                                .c_str(),
-                            row == trajectory_editor_selected_row_)) {
-        trajectory_editor_selected_row_ = row;
-      }
-
-      double edited_time = times[static_cast<size_t>(row)];
-      double edited_rho = rhos[static_cast<size_t>(row)];
-      double edited_temp = temps[static_cast<size_t>(row)];
-
-      auto apply_row_edit = [&]() {
-        std::string error;
-        if (app_state_->set_trajectory_row(static_cast<size_t>(row),
-                                           edited_time, edited_rho,
-                                           edited_temp, error)) {
-          cancel_trajectory_integration_job();
-          trajectory_step_ui_ =
-              std::min(trajectory_step_ui_,
-                       static_cast<int>(app_state_->trajectory_size() - 1));
-          status_message_ = "Trajectory row updated";
-        } else {
-          status_message_ = "Trajectory edit rejected: " + error;
+    ImGuiListClipper clipper;
+    clipper.Begin(row_count);
+    while (clipper.Step()) {
+      for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        if (ImGui::Selectable((std::to_string(row) + "##traj_edit_select_" +
+                               std::to_string(row))
+                                  .c_str(),
+                              row == trajectory_editor_selected_row_)) {
+          trajectory_editor_selected_row_ = row;
         }
-      };
 
-      ImGui::TableSetColumnIndex(1);
-      ImGui::SetNextItemWidth(-1.0f);
-      if (ImGui::InputDouble(("##traj_t_" + std::to_string(row)).c_str(),
-                             &edited_time, 0.0, 0.0, "%.9e")) {
-        apply_row_edit();
-      }
+        double edited_time = times[static_cast<size_t>(row)];
+        double edited_rho = rhos[static_cast<size_t>(row)];
+        double edited_temp = temps[static_cast<size_t>(row)];
 
-      ImGui::TableSetColumnIndex(2);
-      ImGui::SetNextItemWidth(-1.0f);
-      if (ImGui::InputDouble(("##traj_rho_" + std::to_string(row)).c_str(),
-                             &edited_rho, 0.0, 0.0, "%.9e")) {
-        apply_row_edit();
-      }
+        auto apply_row_edit = [&]() {
+          std::string error;
+          if (app_state_->set_trajectory_row(static_cast<size_t>(row),
+                                             edited_time, edited_rho,
+                                             edited_temp, error)) {
+            cancel_trajectory_integration_job();
+            trajectory_step_ui_ =
+                std::min(trajectory_step_ui_,
+                         static_cast<int>(app_state_->trajectory_size() - 1));
+            status_message_ = "Trajectory row updated";
+          } else {
+            status_message_ = "Trajectory edit rejected: " + error;
+          }
+        };
 
-      ImGui::TableSetColumnIndex(3);
-      ImGui::SetNextItemWidth(-1.0f);
-      if (ImGui::InputDouble(("##traj_temp_" + std::to_string(row)).c_str(),
-                             &edited_temp, 0.0, 0.0, "%.9e")) {
-        apply_row_edit();
+        ImGui::TableSetColumnIndex(1);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (input_double_committed(("##traj_t_" + std::to_string(row)).c_str(),
+                                   &edited_time, 0.0, 0.0, "%.9e")) {
+          apply_row_edit();
+        }
+
+        ImGui::TableSetColumnIndex(2);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (input_double_committed(
+                ("##traj_rho_" + std::to_string(row)).c_str(), &edited_rho, 0.0,
+                0.0, "%.9e")) {
+          apply_row_edit();
+        }
+
+        ImGui::TableSetColumnIndex(3);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (input_double_committed(
+                ("##traj_temp_" + std::to_string(row)).c_str(), &edited_temp,
+                0.0, 0.0, "%.9e")) {
+          apply_row_edit();
+        }
       }
     }
-
     ImGui::EndTable();
   }
 
@@ -1756,9 +1876,9 @@ void MainWindow::render_trajectory_editor_panel() {
     const double last_time = times.back();
     const double last_rho = rhos.back();
     const double last_temp = temps.back();
-    const double dt =
-        times.size() > 1 ? std::max(last_time - times[times.size() - 2], 0.0)
-                         : 1.0;
+    const double dt = times.size() > 1 && last_time > times[times.size() - 2]
+                          ? last_time - times[times.size() - 2]
+                          : 1.0;
     std::string error;
     if (app_state_->append_trajectory_row(last_time + dt, last_rho, last_temp,
                                           error)) {
@@ -1795,10 +1915,9 @@ void MainWindow::render_trajectory_editor_panel() {
   ImGui::InputText("##save_traj_path", save_traj_path_,
                    sizeof(save_traj_path_));
   ImGui::SameLine();
-  if (ImGui::Button("Save As", ImVec2(100, 0))) {
+  if (save_button("Save As", save_traj_path_, ImVec2(100, 0))) {
     if (app_state_->save_trajectory_file(save_traj_path_)) {
-      status_message_ =
-          std::string("Saved trajectory: ") + save_traj_path_;
+      status_message_ = std::string("Saved trajectory: ") + save_traj_path_;
     } else {
       status_message_ =
           std::string("Failed to save trajectory: ") + save_traj_path_;
@@ -1815,8 +1934,10 @@ void MainWindow::apply_composition_preset(
   const auto &species_names = app_state_->get_species_names();
 
   for (const auto &entry : composition) {
-    if (std::find(species_names.begin(), species_names.end(), entry.first) == species_names.end()) {
-      status_message_ = "Preset unavailable: network does not contain " + entry.first;
+    if (std::find(species_names.begin(), species_names.end(), entry.first) ==
+        species_names.end()) {
+      status_message_ =
+          "Preset unavailable: network does not contain " + entry.first;
       return;
     }
   }
@@ -1865,6 +1986,10 @@ void MainWindow::refresh_isotope_diagnostics(int index) {
     return;
   }
 
+  const auto &settings = app_state_->integration_settings();
+  isotope_info_rho_ = settings.rho;
+  isotope_info_temp_ = settings.temp;
+  isotope_info_xnuc_ = settings.xnuc;
   try {
     isotope_info_rate_ = app_state_->get_species_rate(index);
     isotope_reactions_ = app_state_->get_species_reaction_diagnostics(index);
@@ -2010,7 +2135,9 @@ void MainWindow::render_file_dialogs() {
   if (show_open_species_popup_ &&
       ImGui::BeginPopupModal("Open NuPPN Run Directory", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
-    ImGui::TextWrapped("Switching NuPPN run directories requires restarting imnet with --data-dir. Reloading this directory does not reload backend physics.");
+    ImGui::TextWrapped("Switching NuPPN run directories requires restarting "
+                       "imnet with --data-dir. Reloading this directory does "
+                       "not reload backend physics.");
     ImGui::TextWrapped("Run directory:");
     ImGui::InputText("##nuppn_run_dir", species_path_, sizeof(species_path_));
     ImGui::Separator();
@@ -2084,9 +2211,9 @@ void MainWindow::render_file_dialogs() {
 
     ImGui::Separator();
     if (ImGui::Button("Reload##rates", ImVec2(120, 0))) {
-      if (app_state_ && app_state_->reload_rate_files(
-                            reaclib_path_, partition_path_, mass_path_,
-                            weak_path_)) {
+      if (app_state_ &&
+          app_state_->reload_rate_files(reaclib_path_, partition_path_,
+                                        mass_path_, weak_path_)) {
         sync_network_path_inputs();
         reset_ui_after_network_reload();
         status_message_ = "Reloaded rate files";
@@ -2142,18 +2269,19 @@ void MainWindow::render_file_dialogs() {
       ImGui::BeginPopupModal("Save Abundances File", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextWrapped("Save abundances to:");
+    ImGui::TextWrapped("%s", status_message_.c_str());
     ImGui::InputText("##save_abund_path", save_abund_path_,
                      sizeof(save_abund_path_));
 
-    if (ImGui::Button("Save##abund", ImVec2(120, 0))) {
+    if (save_button("Save##abund", save_abund_path_, ImVec2(120, 0))) {
       if (app_state_ && app_state_->save_abundances_to_file(save_abund_path_)) {
         status_message_ = std::string("Saved abundances: ") + save_abund_path_;
+        show_save_abund_popup_ = false;
+        ImGui::CloseCurrentPopup();
       } else {
         status_message_ =
             std::string("Failed to save abundances: ") + save_abund_path_;
       }
-      show_save_abund_popup_ = false;
-      ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel##save_abund", ImVec2(120, 0))) {
@@ -2169,19 +2297,21 @@ void MainWindow::render_file_dialogs() {
   if (show_save_state_popup_ &&
       ImGui::BeginPopupModal("Save State File", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
-    ImGui::TextWrapped("Save portable analysis state to:");
+    ImGui::TextWrapped(
+        "Export cached results for analysis (not a reloadable project):");
+    ImGui::TextWrapped("%s", status_message_.c_str());
     ImGui::InputText("##save_state_path", save_state_path_,
                      sizeof(save_state_path_));
 
-    if (ImGui::Button("Save##state", ImVec2(120, 0))) {
+    if (save_button("Save##state", save_state_path_, ImVec2(120, 0))) {
       if (app_state_ && app_state_->save_state_to_file(save_state_path_)) {
         status_message_ = std::string("Saved state: ") + save_state_path_;
+        show_save_state_popup_ = false;
+        ImGui::CloseCurrentPopup();
       } else {
-        status_message_ = std::string("Failed to save state: ") +
-                          save_state_path_;
+        status_message_ =
+            std::string("Failed to save state: ") + save_state_path_;
       }
-      show_save_state_popup_ = false;
-      ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel##save_state", ImVec2(120, 0))) {
@@ -2203,6 +2333,8 @@ void MainWindow::render_file_dialogs() {
       if (app_state_ && app_state_->load_trajectory_file(load_traj_path_)) {
         cancel_trajectory_integration_job();
         trajectory_step_ui_ = 0;
+        run_mode_ = 2;
+        show_trajectory_plot_ = true;
         status_message_ = std::string("Loaded trajectory: ") + load_traj_path_;
       } else {
         status_message_ =
@@ -2257,14 +2389,14 @@ void MainWindow::render_selected_abundance_editor() {
     double x = settings.xnuc[i];
     std::string label = species_names[i] + "##xnuc_" + std::to_string(i);
     ImGui::PushItemWidth(180.0f);
-    if (ImGui::InputDouble(label.c_str(), &x, 0.0, 0.0, "%.6e")) {
+    if (input_double_committed(label.c_str(), &x, 0.0, 0.0, "%.6e")) {
       settings.xnuc[i] = std::isfinite(x) ? std::max(0.0, x) : 0.0;
       composition_changed();
     }
     ImGui::PopItemWidth();
 
     ImGui::SameLine();
-    std::string fixed_label = std::string("fixed##fixed_") + std::to_string(i);
+    std::string fixed_label = std::string("Lock X##fixed_") + std::to_string(i);
     bool fixed_value = settings.fixed[i];
     if (ImGui::Checkbox(fixed_label.c_str(), &fixed_value)) {
       settings.fixed[i] = fixed_value;
@@ -2301,12 +2433,15 @@ bool MainWindow::load_nuppn_input_files() {
   };
 
   const std::filesystem::path run_dir = app_state_->species_file();
-  const bool frame_ok = load_file(run_dir / "ppn_frame.input", nuppn_frame_input_,
-                                  sizeof(nuppn_frame_input_));
-  const bool physics_ok = load_file(run_dir / "ppn_physics.input", nuppn_physics_input_,
-                                    sizeof(nuppn_physics_input_));
-  const bool solver_ok = load_file(run_dir / "ppn_solver.input", nuppn_solver_input_,
-                                   sizeof(nuppn_solver_input_));
+  const bool frame_ok =
+      load_file(run_dir / "ppn_frame.input", nuppn_frame_input_,
+                sizeof(nuppn_frame_input_));
+  const bool physics_ok =
+      load_file(run_dir / "ppn_physics.input", nuppn_physics_input_,
+                sizeof(nuppn_physics_input_));
+  const bool solver_ok =
+      load_file(run_dir / "ppn_solver.input", nuppn_solver_input_,
+                sizeof(nuppn_solver_input_));
   return frame_ok && physics_ok && solver_ok;
 }
 

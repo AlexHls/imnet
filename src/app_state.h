@@ -31,21 +31,21 @@ struct IntegrationSettings {
  * @brief UI view and display settings
  */
 struct ViewSettings {
-  float chart_zoom = 1.0f;        ///< Zoom level for nuclide chart
-  bool show_unconnected = false;  ///< Highlight unconnected species
-  bool show_abundance = false;    ///< Color-code by abundance
-  bool show_fluxes = false;       ///< Draw reaction flux arrows
+  float chart_zoom = 1.0f;         ///< Zoom level for nuclide chart
+  bool show_unconnected = false;   ///< Highlight unconnected species
+  bool show_abundance = false;     ///< Color-code by abundance
+  bool show_fluxes = false;        ///< Draw reaction flux arrows
   bool show_regular_fluxes = true; ///< Draw regular reaction arrows
   bool show_weak_fluxes = true;    ///< Draw weak reaction arrows
-  int flux_arrow_metric = 0;      ///< 0 = |dY/dt|, 1 = |dX/dt|, 2 = rate
-  double flux_threshold = 1e-30;  ///< Minimum flux strength to display
-  int max_flux_arrows = 80;       ///< Maximum displayed arrows per type
-  int flux_color_mode = 0;        ///< 0 = flat, 1 = linear, 2 = log flux
-  int flux_colormap = 0;          ///< Colormap for scaled flux arrows
-  int flux_colorbar_position = 3; ///< Preset colorbar position
+  int flux_arrow_metric = 0;       ///< 0 = |dY/dt|, 1 = |dX/dt|, 2 = rate
+  double flux_threshold = 1e-30;   ///< Minimum flux strength to display
+  int max_flux_arrows = 80;        ///< Maximum displayed arrows per type
+  int flux_color_mode = 0;         ///< 0 = flat, 1 = linear, 2 = log flux
+  int flux_colormap = 0;           ///< Colormap for scaled flux arrows
+  int flux_colorbar_position = 3;  ///< Preset colorbar position
   float flux_color[4] = {1.00f, 0.22f, 0.64f, 0.95f};
   float weak_flux_color[4] = {0.50f, 1.00f, 0.36f, 0.95f};
-  int max_cached_trajectory_steps = 100; ///< Max trajectory rows to cache
+  int max_cached_trajectory_steps = 3000; ///< Max trajectory rows to cache
 };
 
 struct TrajectoryStepCache {
@@ -339,8 +339,7 @@ public:
   get_species_reaction_diagnostics(int species_index,
                                    size_t max_count = 12) const;
 
-  std::vector<ReactionFlux> get_reaction_fluxes(double min_strength,
-                                                int metric,
+  std::vector<ReactionFlux> get_reaction_fluxes(double min_strength, int metric,
                                                 size_t max_count = 100,
                                                 bool include_regular = true,
                                                 bool include_weak = true) const;
