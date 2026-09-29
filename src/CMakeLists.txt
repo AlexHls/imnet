@@ -127,6 +127,7 @@ else()
     target_compile_options(imnet PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+set(IMNET_TEST_DATA_DIR "${DATA_DIR}" CACHE PATH "Rate/species directory for Yann app tests")
 if(BUILD_TESTING AND IMNET_NETWORK_BACKEND STREQUAL "YANN")
     add_executable(imnet_app_tests
         ${CMAKE_SOURCE_DIR}/tests/app_layer_tests.cpp
@@ -139,7 +140,7 @@ if(BUILD_TESTING AND IMNET_NETWORK_BACKEND STREQUAL "YANN")
     )
     target_link_libraries(imnet_app_tests PRIVATE libnetwork)
     target_compile_definitions(imnet_app_tests PRIVATE
-        IMNET_TEST_DATA_DIR="${DATA_DIR}"
+        IMNET_TEST_DATA_DIR="${IMNET_TEST_DATA_DIR}"
     )
     add_test(NAME imnet_app_tests COMMAND imnet_app_tests)
 endif()

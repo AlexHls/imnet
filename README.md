@@ -195,8 +195,8 @@ and File → Load Trajectory to load `trajectory.txt` from that run directory.
 Select Loaded trajectory and Run. Enable flux arrows, browse cached steps,
 and compare the abundance and flux views with the generated plots. The full
 trajectory has 2,362 rows; increase the GUI cache limit when inspecting many
-rows. GUI command-line abundance/trajectory flags currently apply only to
-headless runs, so load these files through the menus.
+rows. You can also supply `--abundances` and `--trajectory` at GUI startup;
+these load the files and select trajectory mode without starting a burn.
 
 ## Run the GUI
 

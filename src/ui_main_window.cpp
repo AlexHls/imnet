@@ -21,10 +21,8 @@
 namespace imyann {
 
 // ============================================================================
-// GLFW Callbacks (static, forward to instance)
+// GLFW error reporting and trajectory helpers
 // ============================================================================
-
-static MainWindow *g_main_window = nullptr;
 
 static TrajectoryStepCache make_trajectory_step_cache(
     size_t index, const std::vector<double> &times,
@@ -77,16 +75,6 @@ static void prune_trajectory_cache(std::vector<TrajectoryStepCache> &cache,
 
 static void glfw_error_callback(int error, const char *description) {
   std::cerr << "GLFW Error " << error << ": " << description << std::endl;
-}
-
-static void glfw_key_callback(GLFWwindow *window, int key, int scancode,
-                              int action, int mods) {
-  (void)window;
-  (void)scancode;
-  (void)mods;
-  if (g_main_window && key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-    g_main_window->request_close();
-  }
 }
 
 // ============================================================================
@@ -180,13 +168,9 @@ MainWindow::MainWindow(int width, int height, const std::string &title)
   glfwMakeContextCurrent(window_);
   glfwSwapInterval(1); // Enable vsync
 
-  g_main_window = this;
-  glfwSetKeyCallback(window_, glfw_key_callback);
-
   try {
     init_imgui();
   } catch (...) {
-    g_main_window = nullptr;
     glfwDestroyWindow(window_);
     window_ = nullptr;
     glfwTerminate();
@@ -204,8 +188,6 @@ MainWindow::~MainWindow() {
     glfwDestroyWindow(window_);
   }
   glfwTerminate();
-
-  g_main_window = nullptr;
 }
 
 void MainWindow::init_imgui() {
@@ -246,13 +228,14 @@ bool MainWindow::should_close() const {
   return should_close_ || glfwWindowShouldClose(window_);
 }
 
-void MainWindow::set_app_state(AppState *state) {
+void MainWindow::set_app_state(AppState *state, int run_mode) {
+  run_mode_ = run_mode;
   app_state_ = state;
   chart_initialized_ = false;
   if (app_state_) {
     sync_network_path_inputs();
 #ifdef IMNET_USE_NUPPN
-    load_nuppn_input_files();
+    nuppn_inputs_loaded_ = load_nuppn_input_files();
 #endif
     nuclide_chart_.initialize(app_state_);
     chart_initialized_ = true;
@@ -303,6 +286,25 @@ void MainWindow::process_frame() {
 }
 
 void MainWindow::render_menu_bar() {
+  const auto shortcut = [](ImGuiKeyChord chord) {
+    return ImGui::Shortcut(chord, ImGuiInputFlags_RouteGlobal);
+  };
+  if (shortcut(ImGuiMod_Ctrl | ImGuiKey_Q)) request_close();
+  if (shortcut(ImGuiMod_Ctrl | ImGuiKey_S)) show_save_state_popup_ = true;
+  if (shortcut(ImGuiMod_Ctrl | ImGuiKey_O)) {
+    sync_network_path_inputs();
+#ifdef IMNET_USE_NUPPN
+    show_open_species_popup_ = true;
+#else
+    show_open_rates_popup_ = true;
+#endif
+  }
+#ifndef IMNET_USE_NUPPN
+  if (shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O)) {
+    sync_network_path_inputs();
+    show_open_species_popup_ = true;
+  }
+#endif
   if (ImGui::BeginMainMenuBar()) {
     if (ImGui::BeginMenu("File")) {
 #ifdef IMNET_USE_NUPPN
@@ -610,6 +612,7 @@ void MainWindow::render_docking_layout() {
         nuppn_inputs_loaded_ = load_nuppn_input_files();
       }
       ImGui::SameLine();
+      ImGui::BeginDisabled(!nuppn_inputs_loaded_);
       if (ImGui::Button("Save Input Files##nuppn_inputs", ImVec2(170, 0))) {
         if (save_nuppn_input_files()) {
           status_message_ = "NuPPN input files saved";
@@ -617,9 +620,11 @@ void MainWindow::render_docking_layout() {
           status_message_ = "Could not save NuPPN input files";
         }
       }
+      ImGui::EndDisabled();
+      ImGui::TextWrapped("Input edits take effect after restarting imnet.");
       if (!nuppn_inputs_loaded_) {
         ImGui::TextColored(ui_theme::danger(),
-                           "Could not load one or more NuPPN input files.");
+                           "Input file missing or too large for the editor; saving is disabled.");
       }
       ImGui::TextWrapped("ppn_frame.input");
       ImGui::InputTextMultiline("##nuppn_frame_input", nuppn_frame_input_,
@@ -906,6 +911,7 @@ void MainWindow::render_composition_editor() {
   auto &settings = app_state_->integration_settings();
   const auto &species_names = app_state_->get_species_names();
 
+  ImGui::TextWrapped("Active controls chart connectivity only. Fixed locks normalization, not burning.");
   ImGui::Checkbox("Show all isotopes", &show_all_abundances_);
   ImGui::SameLine();
   ImGui::Checkbox("Nonzero only", &show_nonzero_only_);
@@ -1120,6 +1126,7 @@ void MainWindow::render_trajectory_controls() {
     ImGui::TableSetupColumn("Status");
     ImGui::TableHeadersRow();
 
+    bool selection_changed = false;
     for (const auto &cached : cache) {
       ImGui::TableNextRow();
       ImGui::TableSetColumnIndex(0);
@@ -1129,7 +1136,7 @@ void MainWindow::render_trajectory_controls() {
                             cached.index ==
                                 static_cast<size_t>(trajectory_step_ui_))) {
         trajectory_step_ui_ = static_cast<int>(cached.index);
-        apply_step();
+        selection_changed = true;
       }
       ImGui::TableSetColumnIndex(1);
       ImGui::Text("%.3e", cached.time);
@@ -1151,6 +1158,7 @@ void MainWindow::render_trajectory_controls() {
     }
 
     ImGui::EndTable();
+    if (selection_changed) apply_step();
   }
 }
 
@@ -1158,6 +1166,11 @@ void MainWindow::start_trajectory_integration_job() {
   if (!app_state_ || !app_state_->has_trajectory() ||
       !app_state_->has_network()) {
     status_message_ = "Cannot start trajectory integration";
+    return;
+  }
+
+  if (normalize_before_integrate_ && !app_state_->normalize_abundances()) {
+    status_message_ = "Could not normalize abundances";
     return;
   }
 
@@ -1180,8 +1193,7 @@ void MainWindow::cancel_trajectory_integration_job() {
   if (trajectory_job_.active) {
     status_message_ = "Background trajectory integration cancelled";
   }
-  trajectory_job_.active = false;
-  trajectory_job_.complete = false;
+  trajectory_job_ = TrajectoryIntegrationJob();
 }
 
 void MainWindow::retarget_trajectory_integration_job() {
@@ -1207,7 +1219,9 @@ void MainWindow::retarget_trajectory_integration_job() {
   }
 
   const bool needs_restart =
-      trajectory_job_.xnuc.empty() || end < trajectory_job_.current_step;
+      trajectory_job_.xnuc.empty() || end < trajectory_job_.current_step ||
+      (start < trajectory_job_.current_step &&
+       (trajectory_job_.cache.empty() || trajectory_job_.cache.front().index > start));
   if (needs_restart) {
     trajectory_job_.current_step = 0;
     trajectory_job_.xnuc = trajectory_job_.initial_xnuc;
@@ -1395,10 +1409,10 @@ void MainWindow::render_trajectory_plot_panel() {
   if (ImPlot::BeginPlot("rho(t)##trajectory_rho", ImVec2(-1, 220))) {
     ImPlot::SetupAxes("t (s)", "rho (g/cm^3)");
     if (trajectory_plot_log_x_ && can_use_log_x) {
-      ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
+      setup_log_plot_axis(ImAxis_X1, *std::min_element(times.begin(), times.end()));
     }
     if (trajectory_plot_log_y_) {
-      ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+      setup_log_plot_axis(ImAxis_Y1, *std::min_element(rhos.begin(), rhos.end()));
     }
     ImPlot::PlotLine("rho", times.data(), rhos.data(), count);
     plot_current_time("current step", current_time);
@@ -1409,10 +1423,10 @@ void MainWindow::render_trajectory_plot_panel() {
   if (ImPlot::BeginPlot("T(t)##trajectory_temp", ImVec2(-1, 220))) {
     ImPlot::SetupAxes("t (s)", "T (K)");
     if (trajectory_plot_log_x_ && can_use_log_x) {
-      ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
+      setup_log_plot_axis(ImAxis_X1, *std::min_element(times.begin(), times.end()));
     }
     if (trajectory_plot_log_y_) {
-      ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+      setup_log_plot_axis(ImAxis_Y1, *std::min_element(temps.begin(), temps.end()));
     }
     ImPlot::PlotLine("T", times.data(), temps.data(), count);
     plot_current_time("current step", current_time);
@@ -1800,6 +1814,12 @@ void MainWindow::apply_composition_preset(
   auto &settings = app_state_->integration_settings();
   const auto &species_names = app_state_->get_species_names();
 
+  for (const auto &entry : composition) {
+    if (std::find(species_names.begin(), species_names.end(), entry.first) == species_names.end()) {
+      status_message_ = "Preset unavailable: network does not contain " + entry.first;
+      return;
+    }
+  }
   std::fill(settings.xnuc.begin(), settings.xnuc.end(), 0.0);
   for (const auto &entry : composition) {
     auto it =
@@ -1906,10 +1926,11 @@ bool MainWindow::render_file_browser(char *path_buffer, size_t buffer_size) {
             (std::filesystem::path(current_browse_dir_) / dir).string();
         refresh_file_browser(current_browse_dir_);
         std::memset(file_name_input_, 0, sizeof(file_name_input_));
+        break;
       }
     }
-    ImGui::EndChild();
   }
+  ImGui::EndChild();
 
   ImGui::TextWrapped("Files:");
   // File list
@@ -1921,8 +1942,8 @@ bool MainWindow::render_file_browser(char *path_buffer, size_t buffer_size) {
         file_name_input_[sizeof(file_name_input_) - 1] = '\0';
       }
     }
-    ImGui::EndChild();
   }
+  ImGui::EndChild();
 
   ImGui::Separator();
 
@@ -1989,6 +2010,7 @@ void MainWindow::render_file_dialogs() {
   if (show_open_species_popup_ &&
       ImGui::BeginPopupModal("Open NuPPN Run Directory", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextWrapped("Switching NuPPN run directories requires restarting imnet with --data-dir. Reloading this directory does not reload backend physics.");
     ImGui::TextWrapped("Run directory:");
     ImGui::InputText("##nuppn_run_dir", species_path_, sizeof(species_path_));
     ImGui::Separator();
@@ -2275,20 +2297,21 @@ bool MainWindow::load_nuppn_input_files() {
     const size_t copied = std::min(text.size(), buffer_size - 1);
     std::memcpy(buffer, text.data(), copied);
     buffer[copied] = '\0';
-    return text.size() < buffer_size;
+    return !file.bad() && text.size() < buffer_size;
   };
 
   const std::filesystem::path run_dir = app_state_->species_file();
-  return load_file(run_dir / "ppn_frame.input", nuppn_frame_input_,
-                   sizeof(nuppn_frame_input_)) &&
-         load_file(run_dir / "ppn_physics.input", nuppn_physics_input_,
-                   sizeof(nuppn_physics_input_)) &&
-         load_file(run_dir / "ppn_solver.input", nuppn_solver_input_,
-                   sizeof(nuppn_solver_input_));
+  const bool frame_ok = load_file(run_dir / "ppn_frame.input", nuppn_frame_input_,
+                                  sizeof(nuppn_frame_input_));
+  const bool physics_ok = load_file(run_dir / "ppn_physics.input", nuppn_physics_input_,
+                                    sizeof(nuppn_physics_input_));
+  const bool solver_ok = load_file(run_dir / "ppn_solver.input", nuppn_solver_input_,
+                                   sizeof(nuppn_solver_input_));
+  return frame_ok && physics_ok && solver_ok;
 }
 
 bool MainWindow::save_nuppn_input_files() {
-  if (!app_state_) {
+  if (!app_state_ || !nuppn_inputs_loaded_) {
     return false;
   }
 
@@ -2298,6 +2321,7 @@ bool MainWindow::save_nuppn_input_files() {
       return false;
     }
     file << buffer;
+    file.close();
     return static_cast<bool>(file);
   };
 
@@ -2309,6 +2333,7 @@ bool MainWindow::save_nuppn_input_files() {
 #endif
 
 void MainWindow::composition_changed() {
+  isotope_info_index_ = -1;
   cancel_trajectory_integration_job();
   if (app_state_) {
     app_state_->clear_trajectory_cache();

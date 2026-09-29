@@ -263,8 +263,8 @@ bool load_abundances(const std::string &filename,
       return false;
     }
 
-    if (!std::isfinite(value)) {
-      std::cerr << "Error: Non-finite abundance file value on line: " << line
+    if (!std::isfinite(value) || value < 0.0) {
+      std::cerr << "Error: Invalid abundance file value on line: " << line
                 << std::endl;
       return false;
     }
@@ -300,6 +300,7 @@ bool load_abundances(const std::string &filename,
     }
   }
 
+  if (file.bad()) return false;
   if (matched_species_count == 0) {
     std::cerr << "Error: No known species abundances found in " << filename
               << std::endl;
@@ -396,6 +397,7 @@ bool load_trajectory(const std::string &filename, std::vector<double> &times,
     parsed_temps.push_back(temp);
   }
 
+  if (file.bad()) return false;
   if (parsed_times.empty()) {
     std::cerr << "Error: No trajectory data loaded from " << filename
               << std::endl;

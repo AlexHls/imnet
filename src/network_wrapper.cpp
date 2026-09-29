@@ -794,6 +794,8 @@ double Network::integrate_to_time(double rho, double temp,
     throw std::runtime_error("Network not initialized");
   }
 
+  last_step_history_.clear();
+  last_substeps_ = 0;
   validate_conditions(rho, temp);
   validate_composition(xnuc, nd_.nuc_count);
   if (!std::isfinite(final_time) || final_time <= 0.0 ||
@@ -809,19 +811,25 @@ double Network::integrate_to_time(double rho, double temp,
   int steps = 0;
   std::vector<IntegrationStepSnapshot> history;
   history.push_back({0, 0.0, rho, temp, next_dt, 0.0, 0, xnuc});
-  for (; time < final_time && steps < max_steps; ++steps) {
-    const double step_dt = std::min(next_dt, final_time - time);
-    if (!std::isfinite(step_dt) || step_dt <= 0.0) {
-      throw std::runtime_error("Invalid final-time timestep");
+  try {
+    for (; time < final_time && steps < max_steps; ++steps) {
+      const double step_dt = std::min(next_dt, final_time - time);
+      if (!std::isfinite(step_dt) || step_dt <= 0.0 || time + step_dt <= time) {
+        throw std::runtime_error("Invalid final-time timestep");
+      }
+      dedt = integrate(rho, temp, xnuc, step_dt);
+      time += step_dt;
+      history.push_back({static_cast<size_t>(steps + 1), time, rho, temp,
+                         step_dt, dedt, last_substeps_, xnuc});
+      const double grown = step_dt * dt_factor;
+      next_dt =
+          std::min(std::isfinite(grown) && grown > 0.0 ? grown : max_dt,
+                   max_dt);
     }
-    dedt = integrate(rho, temp, xnuc, step_dt);
-    time += step_dt;
-    history.push_back({static_cast<size_t>(steps + 1), time, rho, temp,
-                       step_dt, dedt, last_substeps_, xnuc});
-    const double grown = step_dt * dt_factor;
-    next_dt =
-        std::min(std::isfinite(grown) && grown > 0.0 ? grown : max_dt,
-                 max_dt);
+  } catch (...) {
+    last_substeps_ = steps;
+    last_step_history_ = std::move(history);
+    throw;
   }
   if (time < final_time) {
     last_substeps_ = steps;

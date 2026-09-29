@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 #include "app_state.h"
@@ -89,25 +90,10 @@ void write_headless_row(std::ostream &out, size_t step, double time, double rho,
   out << "\n";
 }
 
-int run_headless(AppState &app_state, const CliOptions &options) {
-  if (options.abundance_file.empty()) {
-    std::cerr << "Headless mode requires --abundances <file>" << std::endl;
-    return 1;
-  }
-  if ((options.output_file.empty() || options.output_file == "-") &&
-      options.state_file.empty()) {
-    std::cerr << "Headless mode requires --output or --save-state"
-              << std::endl;
-    return 1;
-  }
-  if (!options.trajectory_file.empty() && options.has_final_time) {
-    std::cerr << "--trajectory and --final-time are separate run modes"
-              << std::endl;
-    return 1;
-  }
-
-  if (!app_state.load_abundances_from_file(options.abundance_file)) {
-    return 1;
+bool configure_initial_state(AppState &app_state, const CliOptions &options) {
+  if (!options.abundance_file.empty() &&
+      !app_state.load_abundances_from_file(options.abundance_file)) {
+    return false;
   }
 
   auto &settings = app_state.integration_settings();
@@ -137,8 +123,16 @@ int run_headless(AppState &app_state, const CliOptions &options) {
     settings.max_steps = options.max_steps;
   }
   if (options.normalize && !app_state.normalize_abundances()) {
-    return 1;
+    return false;
   }
+
+  if (!options.trajectory_file.empty() &&
+      !app_state.load_trajectory_file(options.trajectory_file)) return false;
+  return true;
+}
+
+int run_headless(AppState &app_state, const CliOptions &options) {
+  auto &settings = app_state.integration_settings();
 
   const auto &species_names = app_state.get_species_names();
 
@@ -156,10 +150,6 @@ int run_headless(AppState &app_state, const CliOptions &options) {
 
   bool success = true;
   if (!options.trajectory_file.empty()) {
-    if (!app_state.load_trajectory_file(options.trajectory_file)) {
-      return 1;
-    }
-
     std::string error;
     success = app_state.run_trajectory(error);
     for (const auto &step : app_state.trajectory_cache()) {
@@ -190,7 +180,7 @@ int run_headless(AppState &app_state, const CliOptions &options) {
     std::string error;
     success = app_state.integrate_single_step(false, dedt, error);
     if (out) {
-      write_headless_row(out, 0, settings.dt, settings.rho, settings.temp,
+      write_headless_row(out, 0, app_state.current_time(), settings.rho, settings.temp,
                          settings.dt, dedt,
                          app_state.get_network()
                              ? app_state.get_network()->last_substeps()
@@ -345,6 +335,31 @@ int main(int argc, char *argv[]) {
   }
 
   try {
+    if (!options.headless_mode && (!options.output_file.empty() || !options.state_file.empty())) {
+      throw std::runtime_error("--output and --save-state require --headless");
+    }
+    if (options.output_file == "-") {
+      throw std::runtime_error("--output requires a file path; stdout output is not supported");
+    }
+    if (!options.trajectory_file.empty() && options.has_final_time) {
+      throw std::runtime_error("--trajectory and --final-time are separate run modes");
+    }
+    if (options.headless_mode && (options.abundance_file.empty() ||
+        (options.output_file.empty() && options.state_file.empty()))) {
+      throw std::runtime_error("Headless mode requires --abundances and --output or --save-state");
+    }
+    const auto same_file = [](const std::string &a, const std::string &b) {
+      if (a.empty() || b.empty()) return false;
+      std::error_code error;
+      return std::filesystem::equivalent(a, b, error) ||
+             std::filesystem::weakly_canonical(a) == std::filesystem::weakly_canonical(b);
+    };
+    for (const auto &output : {options.output_file, options.state_file}) {
+      if (same_file(output, options.abundance_file) || same_file(output, options.trajectory_file))
+        throw std::runtime_error("Output file must not overwrite an input file");
+    }
+    if (same_file(options.output_file, options.state_file))
+      throw std::runtime_error("CSV and JSON output paths must be different");
     std::cout << "=== imnet: Interactive " << Network::backend_name()
               << " Nuclear Network ===" << std::endl;
     std::cout << std::endl;
@@ -382,6 +397,7 @@ int main(int argc, char *argv[]) {
     std::cout << "Network loaded successfully" << std::endl;
     std::cout << std::endl;
 
+    if (!configure_initial_state(app_state, options)) return 1;
     if (options.headless_mode) {
       return run_headless(app_state, options);
     }
@@ -394,9 +410,10 @@ int main(int argc, char *argv[]) {
       MainWindow window(1600, 900, std::string("imnet - Interactive ") +
                                        Network::backend_name() +
                                        " Nuclear Network");
-      window.set_app_state(&app_state);
+      window.set_app_state(&app_state, options.has_final_time ? 1 :
+                            app_state.has_trajectory() ? 2 : 0);
 
-      std::cout << "Main window ready. Press ESC or close window to exit."
+      std::cout << "Main window ready. Use File > Exit or close the window to exit."
                 << std::endl;
 
       // Main event loop

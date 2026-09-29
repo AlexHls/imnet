@@ -234,6 +234,10 @@ contains
       call calculate_ye(yps, an, zn, ye, considerisotope)
       call evaluate_all_rates(ye, nvar_saved, nvrel_saved, rho, t9, yps, nu_saved)
       dedt = energy_flux(yps)
+      if (dt == ZERO) then
+         nuppn_integrate = 0_c_int
+         return
+      end if
       call integrate_network(nvar_saved, yps, t9_0, t9_1, rho0, rho1, ye, dt, &
          nvrel_saved, nu_saved, ierr, ZERO)
       if (ierr /= 0) then
@@ -266,12 +270,20 @@ contains
       time = ZERO
       step_dt = min(initial_dt, max_dt)
       total_substeps = 0
+      if (max_steps <= 0_c_int .or. max_steps == huge(max_steps)) then
+         nuppn_integrate_to_time = 5_c_int
+         return
+      end if
       call reset_history(max_steps + 1_c_int)
       call append_history(time, rho, temp_k, step_dt, ZERO, 0, yps)
       do step = 1, max_steps
          if (time >= final_time) exit
          dt = min(step_dt, final_time - time)
-         if (dt <= ZERO) exit
+         if (dt <= ZERO .or. time + dt <= time) then
+            last_substeps = int(total_substeps, c_int)
+            nuppn_integrate_to_time = 5_c_int
+            return
+         end if
 
          call calculate_ye(yps, an, zn, ye, considerisotope)
          call evaluate_all_rates(ye, nvar_saved, nvrel_saved, rho, t9, yps, nu_saved)

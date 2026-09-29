@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 #include <unordered_map>
 
 namespace imyann {
@@ -143,6 +144,7 @@ bool AppState::initialize_network(const std::string &species_file,
     species_names_ = std::move(new_species_names);
     integration_settings_ = std::move(new_settings);
     initial_xnuc_ = std::move(new_initial_xnuc);
+    current_time_ = 0.0;
     species_file_ = species_file;
     reaclib_file_ = reaclib_file;
     partition_file_ = partition_file;
@@ -173,6 +175,7 @@ bool AppState::reload_rate_files(const std::string &reaclib_file,
 }
 
 void AppState::reset_abundances() {
+  current_time_ = 0.0;
   integration_settings_.xnuc = initial_xnuc_;
   integration_settings_.fixed.assign(integration_settings_.xnuc.size(), false);
   invalidate_trajectory_cache();
@@ -201,6 +204,10 @@ bool AppState::normalize_abundances() {
     }
   }
 
+  if (!std::isfinite(fixed_sum) || !std::isfinite(unfixed_sum)) {
+    std::cerr << "Warning: Abundance sum overflowed" << std::endl;
+    return false;
+  }
   constexpr double tolerance = 1e-12;
   if (fixed_sum > 1.0 + tolerance) {
     std::cerr << "Warning: Fixed abundances sum to " << fixed_sum
@@ -292,10 +299,19 @@ bool AppState::integrate_single_step(bool normalize_before, double &dedt,
       last_error_ = error;
       return false;
     }
+    const double next_time = current_time_ + integration_settings_.dt;
+    if (!std::isfinite(next_time) ||
+        (integration_settings_.dt > 0.0 && next_time <= current_time_)) {
+      throw std::runtime_error("Timestep cannot advance the current time");
+    }
+    auto next_xnuc = integration_settings_.xnuc;
     dedt = network_->integrate(integration_settings_.rho,
-                               integration_settings_.temp,
-                               integration_settings_.xnuc,
+                               integration_settings_.temp, next_xnuc,
                                integration_settings_.dt);
+    validate_step_composition(next_xnuc, species_names_);
+    if (!std::isfinite(dedt)) throw std::runtime_error("Non-finite energy generation");
+    integration_settings_.xnuc = std::move(next_xnuc);
+    current_time_ = next_time;
     last_dedt_ = dedt;
     last_success_ = true;
     last_status_ = "ok";
@@ -343,8 +359,8 @@ bool AppState::run_to_time(bool normalize_before, std::string &error) {
     error = "Maximum timestep must be finite and positive";
   } else if (!std::isfinite(dt_factor) || dt_factor <= 0.0) {
     error = "Timestep factor must be finite and positive";
-  } else if (max_steps <= 0) {
-    error = "Max steps must be positive";
+  } else if (max_steps <= 0 || max_steps == std::numeric_limits<int>::max()) {
+    error = "Max steps must be positive and leave room for the initial row";
   }
   if (!error.empty()) {
     last_error_ = error;
@@ -497,6 +513,7 @@ bool AppState::load_abundances_from_file(const std::string &filename) {
   }
   integration_settings_.xnuc = xnuc;
   initial_xnuc_ = std::move(xnuc);
+  current_time_ = 0.0;
   invalidate_trajectory_cache();
   return true;
 }
@@ -519,6 +536,7 @@ bool AppState::load_trajectory_file(const std::string &filename) {
   trajectory_temps_ = std::move(temps);
   invalidate_trajectory_cache();
   trajectory_index_ = 0;
+  current_time_ = trajectory_times_.front();
 
   if (!trajectory_rhos_.empty()) {
     integration_settings_.rho = trajectory_rhos_[0];
@@ -559,10 +577,7 @@ bool AppState::save_state_to_file(const std::string &filename) const {
   if (steps.empty() || !current_is_cached) {
     TrajectoryStepCache current;
     current.index = trajectory_index_;
-    current.time =
-        trajectory_index_ < trajectory_times_.size()
-            ? trajectory_times_[trajectory_index_]
-            : 0.0;
+    current.time = current_time_;
     current.rho = integration_settings_.rho;
     current.temp = integration_settings_.temp;
     current.dt = integration_settings_.dt;
@@ -577,12 +592,7 @@ bool AppState::save_state_to_file(const std::string &filename) const {
   std::sort(steps.begin(), steps.end(),
             [](const auto &a, const auto &b) { return a.index < b.index; });
 
-  std::ofstream out(filename);
-  if (!out) {
-    std::cerr << "Error: Could not open state output file: " << filename
-              << std::endl;
-    return false;
-  }
+  std::ostringstream out;
   out << std::setprecision(17) << std::scientific;
   out << "{\n  \"format\": \"imnet-state-v1\",\n"
       << "  \"units\": {\"time\": \"s\", \"rho\": \"g/cm^3\", "
@@ -657,9 +667,11 @@ bool AppState::save_state_to_file(const std::string &filename) const {
   try {
     for (size_t i = 0; i < steps.size(); ++i) {
       const auto &step = steps[i];
-      if (step.xnuc.size() != species_data_.size()) {
-        throw std::runtime_error("saved abundance vector size mismatch");
+      validate_step_composition(step.xnuc, species_names_);
+      for (double value : {step.time, step.rho, step.temp, step.dt, step.dedt}) {
+        if (!std::isfinite(value)) throw std::runtime_error("Non-finite state metadata");
       }
+      if (step.rho <= 0 || step.temp <= 0) throw std::runtime_error("Invalid state conditions");
       const auto fluxes = network_->get_reaction_fluxes(
           step.rho, step.temp, step.xnuc, 0.0, 0,
           std::numeric_limits<size_t>::max());
@@ -697,8 +709,10 @@ bool AppState::save_state_to_file(const std::string &filename) const {
     return false;
   }
   out << "\n  ]\n}\n";
-  out.close();
-  if (!out) {
+  std::ofstream file(filename);
+  file << out.str();
+  file.close();
+  if (!file) {
     std::cerr << "Error: Failed while writing state file: " << filename
               << std::endl;
     return false;
@@ -781,7 +795,7 @@ bool AppState::run_trajectory(std::string &error) {
       }
       validate_step_composition(next_xnuc, species_names_);
       xnuc = std::move(next_xnuc);
-      make_step(i + 1, dedt, network_->last_substeps(), true, "ok", "");
+      make_step(i + 1, dedt, dt > 0.0 ? network_->last_substeps() : 0, true, "ok", "");
     } catch (const std::exception &e) {
       error = "Step " + std::to_string(i + 1) + " failed: " + e.what();
       make_step(i + 1, dedt, network_->last_substeps(), false, "failed",
@@ -812,6 +826,11 @@ bool AppState::set_trajectory_step(size_t step) {
     integration_settings_.temp = cached->temp;
     integration_settings_.dt = cached->dt;
     integration_settings_.xnuc = cached->xnuc;
+    current_time_ = cached->time;
+    last_dedt_ = cached->dedt;
+    last_success_ = cached->success;
+    last_status_ = cached->status;
+    last_error_ = cached->error;
     if (cached->success) {
       record_reaction_flux_state(cached->rho, cached->temp, cached->xnuc);
     } else {
@@ -957,6 +976,12 @@ bool AppState::validate_composition(std::string &error) const {
       error = "Invalid abundance for " + species_names_[i];
       return false;
     }
+  }
+  double sum = 0.0;
+  for (double x : integration_settings_.xnuc) sum += x;
+  if (!std::isfinite(sum) || sum <= 0.0) {
+    error = "Total abundance must be finite and positive";
+    return false;
   }
   error.clear();
   return true;

@@ -438,7 +438,8 @@ void NuclideChart::render() {
             : (connected_to_selection ? drawn.thickness + 2.5f
                                       : drawn.thickness);
     const float head_len =
-        std::max(5.0f, 7.0f + 5.0f * drawn.relative_strength) * zoom_;
+        std::min(len * 0.8f,
+                 std::max(5.0f, 7.0f + 5.0f * drawn.relative_strength) * zoom_);
     const float head_half_width = std::max(3.0f, thickness * 1.4f);
     ImVec4 color;
     if (view_settings.flux_color_mode != 0) {

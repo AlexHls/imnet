@@ -72,6 +72,7 @@ struct TrajectoryStepCache {
 class AppState {
 public:
   AppState() = default;
+  double current_time() const { return current_time_; }
   ~AppState() = default;
 
   // Deleted copy/move
@@ -356,6 +357,7 @@ private:
   std::unique_ptr<Network> network_;
   std::vector<std::string> species_names_;
   std::vector<Species> species_data_;
+  double current_time_ = 0.0;
   std::vector<double> initial_xnuc_; ///< Backup of initial abundances
   std::string species_file_;
   std::string reaclib_file_;

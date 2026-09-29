@@ -39,7 +39,7 @@ public:
   /**
    * @brief Set the application state
    */
-  void set_app_state(AppState *state);
+  void set_app_state(AppState *state, int run_mode = 0);
 
   /**
    * @brief Main event loop

@@ -200,6 +200,29 @@ def main():
     initial, trajectory = work / "initial.txt", work / "trajectory.txt"
     initial.write_text("p 0.5\nhe4 0.25\nc12 0.25\n")
     np.savetxt(trajectory, np.column_stack([times, np.full_like(times, 1e4), np.full_like(times, 2e8)]), fmt="%.17e")
+    # CLI failures must preserve inputs and produce a nonzero status.
+    binary = args.imnet.resolve()
+    for extra in (["--output", initial], ["--output", trajectory],
+                  ["--output", work / "same", "--save-state", work / "same"],
+                  ["--output", "-"]):
+        completed = subprocess.run([str(x) for x in
+            [binary, "--headless", "--data-dir", network, "--abundances", initial,
+             "--trajectory", trajectory, *extra]], cwd=work, capture_output=True, timeout=20)
+        assert completed.returncode != 0, "Invalid CLI invocation was accepted"
+    assert initial.read_text() == "p 0.5\nhe4 0.25\nc12 0.25\n"
+    assert len(np.loadtxt(trajectory)) == len(times)
+    single = work / "single.json"
+    run([binary, "--headless", "--data-dir", network, "--abundances", initial,
+         "--rho", "1e4", "--temp", "2e8", "--dt", "1e-6", "--save-state", single],
+        work, work / "single.log")
+    single_state = json.loads(single.read_text())
+    assert single_state["steps"][0]["time"] == 1e-6
+    zero = work / "zero.txt"
+    zero.write_text("p 0\n")
+    completed = subprocess.run([str(x) for x in
+        [binary, "--headless", "--data-dir", network, "--abundances", zero,
+         "--output", work / "zero.csv"]], cwd=work, capture_output=True, timeout=30)
+    assert completed.returncode != 0, "All-zero composition was accepted"
     state_path, csv_path = work / "headless.json", work / "headless.csv"
     run([args.imnet.resolve(), "--headless", "--data-dir", network, "--abundances", initial,
          "--trajectory", trajectory, "--output", csv_path, "--save-state", state_path],
