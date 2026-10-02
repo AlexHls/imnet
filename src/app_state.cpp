@@ -570,6 +570,7 @@ bool AppState::save_state_to_file(const std::string &filename) const {
   }
 
   std::vector<TrajectoryStepCache> steps = trajectory_cache_;
+  // Export computed results unchanged; current inputs only fill an uncached row.
   const bool current_is_cached =
       std::any_of(steps.begin(), steps.end(), [this](const auto &step) {
         return step.index == trajectory_index_;
@@ -709,14 +710,8 @@ bool AppState::save_state_to_file(const std::string &filename) const {
     return false;
   }
   out << "\n  ]\n}\n";
-  std::ofstream file(filename);
-  file << out.str();
-  file.close();
-  if (!file) {
-    std::cerr << "Error: Failed while writing state file: " << filename
-              << std::endl;
+  if (!write_file_atomic(filename, [&](std::ostream &file) { file << out.str(); }))
     return false;
-  }
   std::cout << "Saved state to " << filename << std::endl;
   return true;
 }

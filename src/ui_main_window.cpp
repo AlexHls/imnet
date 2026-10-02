@@ -1,4 +1,5 @@
 #include "ui_main_window.h"
+#include "file_io.h"
 #include "ui_theme.h"
 #include <filesystem>
 #include <fstream>
@@ -679,7 +680,7 @@ void MainWindow::render_docking_layout() {
         if (save_nuppn_input_files()) {
           status_message_ = "NuPPN input files saved";
         } else {
-          status_message_ = "Could not save NuPPN input files";
+          status_message_ = "Could not save all NuPPN inputs; some files may have been updated.";
         }
       }
       ImGui::EndDisabled();
@@ -2299,6 +2300,9 @@ void MainWindow::render_file_dialogs() {
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextWrapped(
         "Export cached results for analysis (not a reloadable project):");
+    ImGui::TextWrapped(
+        "Cached rows keep their computed conditions and abundances. "
+        "Current edits are exported only when the selected step has no cached result.");
     ImGui::TextWrapped("%s", status_message_.c_str());
     ImGui::InputText("##save_state_path", save_state_path_,
                      sizeof(save_state_path_));
@@ -2451,13 +2455,8 @@ bool MainWindow::save_nuppn_input_files() {
   }
 
   auto save_file = [](const std::filesystem::path &path, const char *buffer) {
-    std::ofstream file(path);
-    if (!file.is_open()) {
-      return false;
-    }
-    file << buffer;
-    file.close();
-    return static_cast<bool>(file);
+    return write_file_atomic(path.string(),
+                             [&](std::ostream &out) { out << buffer; });
   };
 
   const std::filesystem::path run_dir = app_state_->species_file();

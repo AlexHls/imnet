@@ -3,9 +3,12 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
+#include <random>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -185,6 +188,50 @@ bool parse_trajectory_metadata(const std::string &line,
 
 } // namespace
 
+bool write_file_atomic(const std::string &filename,
+                       const std::function<void(std::ostream &)> &write) {
+  namespace fs = std::filesystem;
+  fs::path staging;
+  bool saved = false;
+  try {
+    fs::path target(filename);
+    // Follow existing links, as ordinary file saves do, without replacing the link.
+    if (fs::is_symlink(target)) target = fs::canonical(target);
+    const bool exists = fs::exists(target);
+    if (exists && !fs::is_regular_file(target))
+      throw std::runtime_error("Destination is not a regular file");
+    std::random_device random;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+      const auto candidate = target.parent_path() /
+          ("." + target.filename().string() + ".tmp-" + std::to_string(random()));
+      // Creating the directory reserves a unique name without opening someone
+      // else's temporary file. Its contents stay on the destination filesystem.
+      if (fs::create_directory(candidate)) {
+        staging = candidate;
+        break;
+      }
+    }
+    if (staging.empty()) throw std::runtime_error("Cannot reserve temporary file");
+    fs::permissions(staging, fs::perms::owner_all);
+    const auto temporary = staging / "output";
+    std::ofstream out(temporary, std::ios::binary);
+    out.exceptions(std::ios::failbit | std::ios::badbit);
+    write(out);
+    out.close();
+    if (exists) fs::permissions(temporary, fs::status(target).permissions());
+    fs::rename(temporary, target);
+    saved = true;
+  } catch (const std::exception &e) {
+    std::cerr << "Error saving " << filename << ": " << e.what() << std::endl;
+  }
+  if (!staging.empty()) {
+    std::error_code ignored;
+    fs::remove(staging / "output", ignored);
+    fs::remove(staging, ignored);
+  }
+  return saved;
+}
+
 bool save_abundances(const std::string &filename,
                      const std::vector<std::string> &species_names,
                      const std::vector<double> &xnuc) {
@@ -201,25 +248,13 @@ bool save_abundances(const std::string &filename,
     }
   }
 
-  std::ofstream file(filename);
-
-  if (!file.is_open()) {
-    std::cerr << "Error: Could not open output file: " << filename << std::endl;
-    return false;
-  }
-
-  file << "# species mass_fraction\n";
-  file << std::setprecision(17) << std::scientific;
-  for (size_t i = 0; i < xnuc.size(); ++i) {
-    file << species_names[i] << " " << xnuc[i] << "\n";
-  }
-
-  file.close();
-  if (!file) {
-    std::cerr << "Error: Failed while writing abundance file: " << filename
-              << std::endl;
-    return false;
-  }
+  if (!write_file_atomic(filename, [&](std::ostream &file) {
+    file << "# species mass_fraction\n";
+    file << std::setprecision(17) << std::scientific;
+    for (size_t i = 0; i < xnuc.size(); ++i) {
+      file << species_names[i] << " " << xnuc[i] << "\n";
+    }
+  })) return false;
   std::cout << "Saved abundances to " << filename << std::endl;
   return true;
 }
@@ -442,25 +477,13 @@ bool save_trajectory(const std::string &filename,
     }
   }
 
-  std::ofstream file(filename);
-  if (!file.is_open()) {
-    std::cerr << "Error: Could not open trajectory output file: " << filename
-              << std::endl;
-    return false;
-  }
-
-  file << "# time(s) rho(g/cm^3) temp(K)\n";
-  file << std::setprecision(17) << std::scientific;
-  for (size_t i = 0; i < times.size(); ++i) {
-    file << times[i] << " " << rhos[i] << " " << temps[i] << "\n";
-  }
-
-  file.close();
-  if (!file) {
-    std::cerr << "Error: Failed while writing trajectory file: " << filename
-              << std::endl;
-    return false;
-  }
+  if (!write_file_atomic(filename, [&](std::ostream &file) {
+    file << "# time(s) rho(g/cm^3) temp(K)\n";
+    file << std::setprecision(17) << std::scientific;
+    for (size_t i = 0; i < times.size(); ++i) {
+      file << times[i] << " " << rhos[i] << " " << temps[i] << "\n";
+    }
+  })) return false;
   std::cout << "Saved trajectory to " << filename << std::endl;
   return true;
 }

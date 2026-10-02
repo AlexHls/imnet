@@ -1,10 +1,16 @@
 #ifndef IMYANN_FILE_IO_H
 #define IMYANN_FILE_IO_H
 
+#include <functional>
+#include <ostream>
 #include <string>
 #include <vector>
 
 namespace imyann {
+
+// Write beside the destination, then replace it only after a successful close.
+bool write_file_atomic(const std::string &filename,
+                       const std::function<void(std::ostream &)> &write);
 
 /**
  * @brief Save abundances to a file

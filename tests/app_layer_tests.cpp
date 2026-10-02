@@ -180,6 +180,14 @@ int main() {
   require(json.str().find("\"strength_dxdt\"") != std::string::npos);
   require(json.str().find("\"strength_rate\"") != std::string::npos);
 
+  // Save State exports computed cache rows, even when visible inputs were edited.
+  settings.temp = 2e8;
+  require(state.save_state_to_file(saved_state.string()));
+  std::ifstream cached_export(saved_state);
+  std::stringstream cached_json;
+  cached_json << cached_export.rdbuf();
+  require(cached_json.str() == json.str());
+
   // Failed exports must not truncate an existing result.
   state.clear_trajectory_cache();
   settings.temp = std::numeric_limits<double>::quiet_NaN();
