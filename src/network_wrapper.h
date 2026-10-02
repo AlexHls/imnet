@@ -27,6 +27,9 @@ extern "C" {
 
 namespace imyann {
 
+// Conservative 256 MiB budget for native, wrapper and application history copies.
+void validate_history_budget(size_t species_count, int max_steps);
+
 /**
  * @struct Species
  * @brief Represents a single nuclear species (isotope)

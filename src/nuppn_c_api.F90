@@ -65,8 +65,9 @@ module imyann_nuppn_c_api
 
 contains
 
-   subroutine reset_history(capacity)
+   subroutine reset_history(capacity, status)
       integer(c_int), intent(in) :: capacity
+      integer, intent(out) :: status
 
       if (allocated(last_history_time)) deallocate(last_history_time)
       if (allocated(last_history_rho)) deallocate(last_history_rho)
@@ -76,17 +77,16 @@ contains
       if (allocated(last_history_substeps)) deallocate(last_history_substeps)
       if (allocated(last_history_xnuc)) deallocate(last_history_xnuc)
 
+      status = 0
       last_history_count = 0_c_int
       last_history_capacity = max(capacity, 0_c_int)
       if (last_history_capacity <= 0_c_int .or. nactive <= 0_c_int) return
 
-      allocate(last_history_time(last_history_capacity))
-      allocate(last_history_rho(last_history_capacity))
-      allocate(last_history_temp(last_history_capacity))
-      allocate(last_history_dt(last_history_capacity))
-      allocate(last_history_dedt(last_history_capacity))
-      allocate(last_history_substeps(last_history_capacity))
-      allocate(last_history_xnuc(nactive, last_history_capacity))
+      allocate(last_history_time(last_history_capacity), &
+         last_history_rho(last_history_capacity), last_history_temp(last_history_capacity), &
+         last_history_dt(last_history_capacity), last_history_dedt(last_history_capacity), &
+         last_history_substeps(last_history_capacity), &
+         last_history_xnuc(nactive, last_history_capacity), stat=status)
    end subroutine reset_history
 
    subroutine append_history(time, rho, temp_k, dt, dedt, substeps, yps)
@@ -274,7 +274,11 @@ contains
          nuppn_integrate_to_time = 5_c_int
          return
       end if
-      call reset_history(max_steps + 1_c_int)
+      call reset_history(max_steps + 1_c_int, ierr)
+      if (ierr /= 0) then
+         nuppn_integrate_to_time = 6_c_int
+         return
+      end if
       call append_history(time, rho, temp_k, step_dt, ZERO, 0, yps)
       do step = 1, max_steps
          if (time >= final_time) exit

@@ -1,4 +1,23 @@
 #include "network_wrapper.h"
+#include <limits>
+#include <stdexcept>
+#include <new>
+
+namespace imyann {
+void validate_history_budget(size_t species_count, int max_steps) {
+  constexpr size_t budget = 256ULL * 1024 * 1024;
+  // Includes four abundance copies, vector growth and per-row metadata.
+  const size_t row_bytes = species_count > budget / 32 ? budget :
+                          1024 + 32 * species_count;
+  const size_t rows = budget / row_bytes;
+  const size_t limit = rows > 0 ? rows - 1 : 0;
+  if (max_steps <= 0 || static_cast<size_t>(max_steps) > limit) {
+    throw std::runtime_error("History memory budget (256 MiB) exceeded: Max steps must be between 1 and " +
+                             std::to_string(limit) + " for this network");
+  }
+}
+} // namespace imyann
+
 
 #ifdef IMNET_USE_NUPPN
 
@@ -7,6 +26,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <queue>
 #include <stdexcept>
 #include <unordered_map>
@@ -205,6 +225,18 @@ Network::Network(const std::string &species_file,
     throw std::runtime_error("NuPPN run directory not found: " + run_dir_);
   }
   run_dir_ = std::filesystem::weakly_canonical(run_dir_).string();
+  for (const char *name : {"ppn_frame.input", "ppn_solver.input",
+                           "ppn_physics.input", "isotopedatabase.txt"}) {
+    const auto path = std::filesystem::path(run_dir_) / name;
+    std::ifstream input(path);
+    if (!std::filesystem::is_regular_file(path) || !input ||
+        input.peek() == std::char_traits<char>::eof()) {
+      throw std::runtime_error("NuPPN required input is missing, unreadable or empty: " + path.string());
+    }
+  }
+  if (!std::filesystem::is_directory(std::filesystem::path(run_dir_).parent_path() / "NPDATA"))
+    throw std::runtime_error("NuPPN requires ../NPDATA beside its run directory");
+
   auto &first_run_dir = initialized_nuppn_run_dir();
   if (!first_run_dir.empty() && first_run_dir != run_dir_) {
     throw std::runtime_error(
@@ -277,6 +309,7 @@ double Network::integrate_to_time(double rho, double temp,
     throw std::runtime_error("Network not initialized");
   }
 
+  validate_history_budget(species_.size(), max_steps);
   last_step_history_.clear();
   validate_conditions(rho, temp);
   validate_composition(xnuc, species_.size());
@@ -294,6 +327,7 @@ double Network::integrate_to_time(double rho, double temp,
                               static_cast<int>(xnuc.size()), final_time,
                               initial_dt, max_dt, dt_factor, max_steps, &dedt);
   last_substeps_ = nuppn_last_substeps();
+  if (status == 6) throw std::bad_alloc();
   last_step_history_ = load_nuppn_step_history(species_);
   check_nuppn_status(status, "nuppn_integrate_to_time");
   validate_composition(xnuc, species_.size());
@@ -794,6 +828,7 @@ double Network::integrate_to_time(double rho, double temp,
     throw std::runtime_error("Network not initialized");
   }
 
+  validate_history_budget(species_.size(), max_steps);
   last_step_history_.clear();
   last_substeps_ = 0;
   validate_conditions(rho, temp);

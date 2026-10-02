@@ -213,6 +213,37 @@ def main():
         assert completed.returncode != 0, "Invalid CLI invocation was accepted"
     assert initial.read_text() == "p 0.5\nhe4 0.25\nc12 0.25\n"
     assert len(np.loadtxt(trajectory)) == len(times)
+    if args.backend == "NUPPN":
+        # Preflight must fail with a normal nonzero exit before Fortran can STOP.
+        for name in ("ppn_frame.input", "ppn_solver.input", "ppn_physics.input",
+                     "isotopedatabase.txt"):
+            path = network / name
+            backup = path.with_suffix(".backup")
+            path.rename(backup)
+            try:
+                for empty in (False, True):
+                    if empty:
+                        path.write_text("")
+                    completed = subprocess.run(
+                        [str(binary), "--headless", "--data-dir", str(network),
+                         "--abundances", str(initial), "--save-state", str(work / "invalid.json")],
+                        cwd=work, capture_output=True, text=True, timeout=20)
+                    assert completed.returncode != 0
+                    assert "NuPPN required input" in completed.stderr, completed.stderr
+                    assert name in completed.stderr
+            finally:
+                backup.replace(path)
+        npdata = work / "NPDATA"
+        backup = work / "NPDATA-backup"
+        npdata.rename(backup)
+        try:
+            completed = subprocess.run(
+                [str(binary), "--headless", "--data-dir", str(network),
+                         "--abundances", str(initial), "--save-state", str(work / "invalid.json")],
+                cwd=work, capture_output=True, text=True, timeout=20)
+            assert completed.returncode != 0 and "requires ../NPDATA" in completed.stderr
+        finally:
+            backup.rename(npdata)
     single = work / "single.json"
     run([binary, "--headless", "--data-dir", network, "--abundances", initial,
          "--rho", "1e4", "--temp", "2e8", "--dt", "1e-6", "--save-state", single],

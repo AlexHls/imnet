@@ -3,6 +3,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 static void require(bool ok, const std::string &message) {
@@ -59,7 +60,39 @@ int main(int argc, char **argv) {
                                        true, true).empty(), "Arrow threshold ignored");
       }
     }
+    const auto saved_size = cache.size();
+    const auto saved_final = cache.back().xnuc;
+    const auto saved_x = app.integration_settings().xnuc;
+    const auto saved_time = app.current_time();
+    app.integration_settings().max_steps = std::numeric_limits<int>::max() - 1;
+    require(!app.run_to_time(true, error) && error.find("256 MiB") != std::string::npos,
+            "Oversized history was accepted");
+    require(cache.size() == saved_size && cache.back().xnuc == saved_final &&
+            app.integration_settings().xnuc == saved_x && app.current_time() == saved_time,
+            "Rejected run destroyed existing results");
+    auto direct_x = saved_x;
+    bool rejected = false;
+    try {
+      app.get_network()->integrate_to_time(1e4, 2e8, direct_x, 1, 1, 1, 1,
+                                           std::numeric_limits<int>::max() - 1);
+    } catch (const std::exception &e) {
+      rejected = std::string(e.what()).find("256 MiB") != std::string::npos;
+    }
+    require(rejected && direct_x == saved_x, "Direct backend bypassed history budget");
     require(app.save_state_to_file(argv[4]), "Cannot export GUI state");
+    // Both native histories must still capture successful and partial runs.
+    auto &settings = app.integration_settings();
+    settings.dt = settings.dt_max = 1e-6;
+    settings.final_time = 2e-6;
+    settings.dt_factor = 1;
+    settings.max_steps = 2;
+    require(app.run_to_time(true, error), "Small final-time run failed: " + error);
+    require(app.trajectory_cache().size() == 3 && app.current_time() == 2e-6,
+            "Final-time history incomplete");
+    settings.max_steps = 1;
+    require(!app.run_to_time(false, error), "Step limit was ignored");
+    require(app.trajectory_cache().size() == 2 && app.current_time() == 1e-6 &&
+            !app.trajectory_cache().back().success, "Partial results were lost");
     std::cout << "Cached-step browsing and all three flux metrics passed\n";
     return 0;
   } catch (const std::exception &e) {
