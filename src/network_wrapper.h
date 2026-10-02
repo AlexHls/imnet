@@ -118,7 +118,9 @@ public:
                    double dt);
 
   /**
-   * @brief Integrate from one thermodynamic state to another over dt
+   * @brief Integrate over dt at the arithmetic midpoint of endpoint rho and T.
+   * Refine trajectory sampling to resolve changing conditions; both backends
+   * use this same piecewise-constant approximation.
    */
   double integrate_interval(double rho0, double temp0, double rho1,
                             double temp1, std::vector<double> &xnuc,

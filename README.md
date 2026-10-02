@@ -178,7 +178,11 @@ Outputs in `build-*/reference-burn/`:
 - `fluxes.png`: exported heavy-nucleus CNO arrows at roughly 1, 100, and 1,000 s;
   proton/alpha legs are omitted for readability. This is a diagnostic plot,
   not a screenshot of imnet.
-- `summary.json`: tolerances, worst discrepancies, and the retained run directory.
+- `varying-trajectory.png`: a 100 s linear ramp from 1e8 to 3e8 K and 5e3 to
+  2e4 g/cm³ at 16, 64 and 256 intervals. Each backend is checked against its own
+  refined numerical reference; this is a convergence check, not an independent
+  physical reference. The 64-interval GUI-state and headless results must agree.
+- `summary.json`: tolerances, worst discrepancies, convergence errors, and the retained run directory.
 - `run-*`: input files, headless CSV, state JSON files, and process logs.
 
 To run an existing executable directly (without the optional state helper):
@@ -378,6 +382,13 @@ Rules:
 - `TUNIT T9K`, `TUNIT T9`, and `TUNIT GK` values are converted to Kelvin.
 - Time must be monotonic non-decreasing.
 - Trajectory files do not contain species abundances.
+- Both backends hold density and temperature at the arithmetic midpoint of each
+  pair of rows during that interval. This approximates a linear trajectory;
+  refine the sampling to resolve rapid changes. Cached rows and condition plots
+  retain the supplied endpoint values. Static conditions are unchanged.
+- This replaces YANN's previous left-endpoint hold and NuPPN's native interpolation
+  for imnet trajectory runs, so changing-condition results can differ from earlier
+  versions.
 
 ## Output Files
 

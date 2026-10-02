@@ -105,6 +105,56 @@ def load_state(path, backend, species, times):
     return state, values
 
 
+def check_varying_trajectory(args, network, initial, work, output):
+    """Convergence against a refined numerical reference, not a second rate set."""
+    histories = {}
+    for intervals in (16, 64, 256):
+        times = np.linspace(0, 100, intervals + 1)
+        trajectory = work / f"varying-{intervals}.txt"
+        np.savetxt(trajectory, np.column_stack([
+            times, 5e3 + 1.5e4 * times / 100, 1e8 + 2e8 * times / 100]), fmt="%.17e")
+        state_path = work / f"varying-{intervals}.json"
+        run([args.imnet.resolve(), "--headless", "--data-dir", network,
+             "--abundances", initial, "--trajectory", trajectory, "--save-state", state_path],
+            work, work / f"varying-{intervals}.log")
+        state = json.loads(state_path.read_text())
+        values = np.array([step["abundances"] for step in state["steps"]])
+        assert len(values) == len(times) and np.isfinite(values).all() and (values >= 0).all()
+        assert all(step["success"] and np.isfinite(step["dedt"]) for step in state["steps"])
+        np.testing.assert_allclose(values.sum(axis=1), 1, atol=1e-6, rtol=0)
+        histories[intervals] = (times, values)
+        if intervals == 64 and args.gui_driver:
+            gui_path = work / "varying-gui.json"
+            run([args.gui_driver.resolve(), network, initial, trajectory, gui_path],
+                work, work / "varying-gui.log")
+            gui = json.loads(gui_path.read_text())
+            np.testing.assert_allclose([step["abundances"] for step in gui["steps"]],
+                                       values, rtol=1e-12, atol=1e-15)
+    reference = histories[256][1]
+    errors = {n: float(np.max(np.sum(abs(x - reference[::256 // n]), axis=1)))
+              for n, (_, x) in histories.items() if n != 256}
+    # Allow solver noise near the convergence floor, but require refinement to
+    # improve a resolved discretization error and stay within 1% total mass.
+    assert errors[64] <= max(0.75 * errors[16], 1e-7), errors
+    assert errors[64] < 0.01, errors
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(3, 3, figsize=(13, 10), sharex=True)
+    for i, (ax, species) in enumerate(zip(axes.flat, state["species"])):
+        for n, (times, values) in histories.items():
+            ax.semilogy(times, np.maximum(values[:, i], 1e-12),
+                        "-" if n == 256 else "--", label=f"{n} intervals")
+        ax.set(title=species["name"], ylim=(1e-12, 1), ylabel="Mass fraction X")
+        ax.grid(True, alpha=0.2)
+    axes[0, 0].legend()
+    for ax in axes[-1]:
+        ax.set_xlabel("Time [s]")
+    fig.suptitle(f"{args.backend}: midpoint convergence, T=1–3e8 K, rho=5e3–2e4 g/cm³")
+    fig.tight_layout()
+    fig.savefig(output / "varying-trajectory.png", dpi=150)
+    plt.close(fig)
+    return {"reference_intervals": 256, "max_L1_error": errors}
+
+
 def plot_results(output, times, reference, results, species, rtol, atol, state):
     os.environ.setdefault("MPLCONFIGDIR", str(output / "matplotlib"))
     os.environ.setdefault("XDG_CACHE_HOME", str(output / ".cache"))
@@ -296,7 +346,8 @@ def main():
         _, gui = load_state(gui_path, args.backend, species, times)
         results[f"{args.backend} GUI state"] = gui
     plot_results(output, times, reference, results, species, args.rtol, args.atol, state)
-    summary = {"backend": args.backend, "rtol": args.rtol, "atol": args.atol,
+    varying = check_varying_trajectory(args, network, initial, work, output)
+    summary = {"varying_trajectory": varying, "backend": args.backend, "rtol": args.rtol, "atol": args.atol,
                "inputs_and_logs": str(work), "results": {}}
     passed = True
     for label, actual in results.items():

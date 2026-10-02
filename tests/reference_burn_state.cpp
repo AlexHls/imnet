@@ -44,6 +44,15 @@ int main(int argc, char **argv) {
         "Network initialization failed");
 #endif
     require(app.load_abundances_from_file(argv[2]), "Cannot load composition");
+    // Both endpoints must influence every interval, identically on both backends.
+    auto interval_x = app.integration_settings().xnuc;
+    auto midpoint_x = interval_x;
+    const double interval_energy = app.get_network()->integrate_interval(
+        5e3, 1e8, 1.5e4, 3e8, interval_x, 1e-3);
+    const double midpoint_energy = app.get_network()->integrate(
+        1e4, 2e8, midpoint_x, 1e-3);
+    require(interval_x == midpoint_x && interval_energy == midpoint_energy,
+            "Trajectory interval does not use midpoint conditions");
     require(app.load_trajectory_file(argv[3]), "Cannot load trajectory");
     std::string error;
     const bool success = app.run_trajectory(error);

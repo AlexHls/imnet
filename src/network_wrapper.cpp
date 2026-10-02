@@ -283,19 +283,11 @@ Network::~Network() = default;
 
 double Network::integrate(double rho, double temp, std::vector<double> &xnuc,
                           double dt) {
-  last_step_history_.clear();
-  return integrate_interval(rho, temp, rho, temp, xnuc, dt);
-}
-
-double Network::integrate_interval(double rho0, double temp0, double rho1,
-                                   double temp1, std::vector<double> &xnuc,
-                                   double dt) {
   if (!initialized_) {
     throw std::runtime_error("Network not initialized");
   }
 
-  validate_conditions(rho0, temp0);
-  validate_conditions(rho1, temp1);
+  validate_conditions(rho, temp);
   validate_composition(xnuc, species_.size());
   if (!std::isfinite(dt) || dt < 0.0) {
     throw std::runtime_error("Invalid timestep");
@@ -306,7 +298,7 @@ double Network::integrate_interval(double rho0, double temp0, double rho1,
   double dedt = 0.0;
   ScopedCurrentPath cwd(run_dir_);
   check_nuppn_status(
-      nuppn_integrate(rho0, temp0, rho1, temp1, result.data(),
+      nuppn_integrate(rho, temp, rho, temp, result.data(),
                       static_cast<int>(xnuc.size()), dt, &dedt),
       "nuppn_integrate");
   last_substeps_ = nuppn_last_substeps();
@@ -831,13 +823,6 @@ double Network::integrate(double rho, double temp, std::vector<double> &xnuc,
   return dedt;
 }
 
-double Network::integrate_interval(double rho0, double temp0, double rho1,
-                                   double temp1, std::vector<double> &xnuc,
-                                   double dt) {
-  validate_conditions(rho1, temp1);
-  return integrate(rho0, temp0, xnuc, dt);
-}
-
 double Network::integrate_to_time(double rho, double temp,
                                   std::vector<double> &xnuc,
                                   double final_time, double initial_dt,
@@ -1293,3 +1278,16 @@ std::vector<std::vector<int>> Network::build_connectivity_graph() const {
 } // namespace imyann
 
 #endif
+
+namespace imyann {
+double Network::integrate_interval(double rho0, double temp0, double rho1,
+                                   double temp1, std::vector<double> &xnuc,
+                                   double dt) {
+  validate_conditions(rho0, temp0);
+  validate_conditions(rho1, temp1);
+  // A shared midpoint hold: refine trajectory rows to resolve rapid changes.
+  // This form avoids overflowing the sum of two finite positive endpoints.
+  return integrate(rho0 + (rho1 - rho0) * 0.5,
+                   temp0 + (temp1 - temp0) * 0.5, xnuc, dt);
+}
+} // namespace imyann

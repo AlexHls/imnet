@@ -739,7 +739,8 @@ void MainWindow::render_single_step_controls() {
         ImGui::TextWrapped("Physical Conditions");
         if (app_state_->has_trajectory())
           ImGui::TextWrapped(
-              "Trajectory runs use the conditions in each loaded row.");
+              "Trajectory intervals use midpoint density and temperature. "
+              "Add rows to resolve rapid changes.");
         ImGui::SetNextItemWidth(condition_input_width);
         if (ImGui::SliderFloat("log10(rho)##single", &log_rho, -2.0f, 12.0f,
                                "%.3f")) {
