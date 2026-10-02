@@ -1,6 +1,5 @@
 #include <cmath>
 #include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -9,6 +8,7 @@
 #include <vector>
 
 #include "app_state.h"
+#include "file_io.h"
 #include "ui_main_window.h"
 
 using namespace imyann;
@@ -132,73 +132,36 @@ bool configure_initial_state(AppState &app_state, const CliOptions &options) {
 }
 
 int run_headless(AppState &app_state, const CliOptions &options) {
-  auto &settings = app_state.integration_settings();
-
-  const auto &species_names = app_state.get_species_names();
-
-  std::ofstream out;
-  if (!options.output_file.empty() && options.output_file != "-") {
-    out.open(options.output_file);
-    if (!out.is_open()) {
-      std::cerr << "Could not open output file: " << options.output_file
-                << std::endl;
-      return 1;
-    }
-    out << std::setprecision(17) << std::scientific;
-    write_headless_header(out, species_names);
+  const bool has_history = !options.trajectory_file.empty() || options.has_final_time;
+  double dedt = 0.0;
+  std::string error;
+  const bool success = !options.trajectory_file.empty()
+      ? app_state.run_trajectory(error)
+      : options.has_final_time ? app_state.run_to_time(false, error)
+                               : app_state.integrate_single_step(false, dedt, error);
+  if (!success) {
+    std::cerr << error << std::endl;
+    // Keep existing exports when no integration interval completed. Partial
+    // histories remain exportable, with the failed row and a nonzero exit code.
+    if (!has_history || app_state.trajectory_cache().size() <= 1) return 1;
   }
 
-  bool success = true;
-  if (!options.trajectory_file.empty()) {
-    std::string error;
-    success = app_state.run_trajectory(error);
-    for (const auto &step : app_state.trajectory_cache()) {
-      if (out) {
-        write_headless_row(out, step.index, step.time, step.rho, step.temp,
-                           step.dt, step.dedt, step.substeps, step.status,
-                           step.xnuc);
+  if (!options.output_file.empty()) {
+    if (!write_file_atomic(options.output_file, [&](std::ostream &out) {
+      out << std::setprecision(17) << std::scientific;
+      write_headless_header(out, app_state.get_species_names());
+      if (has_history) {
+        for (const auto &step : app_state.trajectory_cache()) {
+          write_headless_row(out, step.index, step.time, step.rho, step.temp,
+                             step.dt, step.dedt, step.substeps, step.status, step.xnuc);
+        }
+      } else {
+        const auto &settings = app_state.integration_settings();
+        write_headless_row(out, 0, app_state.current_time(), settings.rho, settings.temp,
+                           settings.dt, dedt, app_state.get_network()->last_substeps(),
+                           "ok", settings.xnuc);
       }
-    }
-    if (!success) {
-      std::cerr << error << std::endl;
-    }
-  } else if (options.has_final_time) {
-    std::string error;
-    success = app_state.run_to_time(false, error);
-    for (const auto &step : app_state.trajectory_cache()) {
-      if (out) {
-        write_headless_row(out, step.index, step.time, step.rho, step.temp,
-                           step.dt, step.dedt, step.substeps, step.status,
-                           step.xnuc);
-      }
-    }
-    if (!success) {
-      std::cerr << error << std::endl;
-    }
-  } else {
-    double dedt = 0.0;
-    std::string error;
-    success = app_state.integrate_single_step(false, dedt, error);
-    if (out) {
-      write_headless_row(out, 0, app_state.current_time(), settings.rho, settings.temp,
-                         settings.dt, dedt,
-                         app_state.get_network()
-                             ? app_state.get_network()->last_substeps()
-                             : 0,
-                         success ? "ok" : "failed", settings.xnuc);
-    }
-    if (!success) {
-      std::cerr << error << std::endl;
-    }
-  }
-
-  if (out.is_open()) {
-    out.close();
-    if (!out) {
-      std::cerr << "Failed while writing output file: " << options.output_file
-                << std::endl;
-      return 1;
-    }
+    })) return 1;
   }
   const bool saved = options.state_file.empty() ||
                      app_state.save_state_to_file(options.state_file);

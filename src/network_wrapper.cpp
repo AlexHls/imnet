@@ -1,4 +1,5 @@
 #include "network_wrapper.h"
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <new>
@@ -15,6 +16,16 @@ void validate_history_budget(size_t species_count, int max_steps) {
     throw std::runtime_error("History memory budget (256 MiB) exceeded: Max steps must be between 1 and " +
                              std::to_string(limit) + " for this network");
   }
+}
+void validate_integration_snapshot(const IntegrationStepSnapshot &step, size_t species_count) {
+  for (double value : {step.time, step.rho, step.temp, step.dt, step.dedt}) {
+    if (!std::isfinite(value)) throw std::runtime_error("Non-finite integration history value");
+  }
+  if (step.time < 0 || step.rho <= 0 || step.temp <= 0 || step.dt < 0 || step.substeps < 0 ||
+      step.xnuc.size() != species_count ||
+      std::any_of(step.xnuc.begin(), step.xnuc.end(),
+                  [](double x) { return !std::isfinite(x) || x < 0; }))
+    throw std::runtime_error("Invalid integration history value");
 }
 } // namespace imyann
 
@@ -86,6 +97,7 @@ void validate_composition(const std::vector<double> &xnuc,
 }
 
 void check_nuppn_status(int status, const char *operation) {
+  if (status == -1001) throw std::runtime_error("NuPPN returned non-finite energy or invalid abundances");
   if (status != 0) {
     throw std::runtime_error(std::string(operation) + " failed with status " +
                              std::to_string(status));
@@ -185,6 +197,7 @@ load_nuppn_step_history(const std::vector<Species> &species) {
                                &step.dedt, &step.substeps, step.xnuc.data(),
                                static_cast<int>(step.xnuc.size())),
         "nuppn_get_history_step");
+    validate_integration_snapshot(step, species.size());
     history.push_back(std::move(step));
   }
   return history;
@@ -289,14 +302,17 @@ double Network::integrate_interval(double rho0, double temp0, double rho1,
   }
 
   last_step_history_.clear();
+  auto result = xnuc;
   double dedt = 0.0;
   ScopedCurrentPath cwd(run_dir_);
   check_nuppn_status(
-      nuppn_integrate(rho0, temp0, rho1, temp1, xnuc.data(),
+      nuppn_integrate(rho0, temp0, rho1, temp1, result.data(),
                       static_cast<int>(xnuc.size()), dt, &dedt),
       "nuppn_integrate");
   last_substeps_ = nuppn_last_substeps();
-  validate_composition(xnuc, species_.size());
+  validate_composition(result, species_.size());
+  if (!std::isfinite(dedt)) throw std::runtime_error("NuPPN returned non-finite energy");
+  xnuc = std::move(result);
   return dedt;
 }
 
@@ -320,17 +336,20 @@ double Network::integrate_to_time(double rho, double temp,
     throw std::runtime_error("Invalid final-time integration settings");
   }
 
+  auto result = xnuc;
   double dedt = 0.0;
   ScopedCurrentPath cwd(run_dir_);
   const int status =
-      nuppn_integrate_to_time(rho, temp, xnuc.data(),
+      nuppn_integrate_to_time(rho, temp, result.data(),
                               static_cast<int>(xnuc.size()), final_time,
                               initial_dt, max_dt, dt_factor, max_steps, &dedt);
   last_substeps_ = nuppn_last_substeps();
   if (status == 6) throw std::bad_alloc();
   last_step_history_ = load_nuppn_step_history(species_);
   check_nuppn_status(status, "nuppn_integrate_to_time");
-  validate_composition(xnuc, species_.size());
+  validate_composition(result, species_.size());
+  if (!std::isfinite(dedt)) throw std::runtime_error("NuPPN returned non-finite energy");
+  xnuc = std::move(result);
   return dedt;
 }
 

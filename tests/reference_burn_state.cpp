@@ -12,6 +12,26 @@ static void require(bool ok, const std::string &message) {
 
 int main(int argc, char **argv) {
   try {
+    // Endothermic energy is valid; NaN/Inf and invalid history fields are not.
+    imyann::IntegrationStepSnapshot valid{0, 0, 1e4, 2e8, 0, -1, 0, {1}};
+    imyann::validate_integration_snapshot(valid, 1);
+    for (int field = 0; field < 8; ++field) {
+      auto invalid = valid;
+      switch (field) {
+        case 0: invalid.dedt = std::numeric_limits<double>::quiet_NaN(); break;
+        case 1: invalid.dedt = std::numeric_limits<double>::infinity(); break;
+        case 2: invalid.xnuc[0] = std::numeric_limits<double>::quiet_NaN(); break;
+        case 3: invalid.xnuc[0] = -1; break;
+        case 4: invalid.rho = 0; break;
+        case 5: invalid.dt = -1; break;
+        case 6: invalid.substeps = -1; break;
+        case 7: invalid.xnuc.clear(); break;
+      }
+      bool rejected = false;
+      try { imyann::validate_integration_snapshot(invalid, 1); }
+      catch (const std::exception &) { rejected = true; }
+      require(rejected, "Invalid solver history accepted");
+    }
     require(argc == 5, "Usage: imnet_reference_state data initial trajectory output");
     imyann::AppState app;
     const std::filesystem::path data(argv[1]);

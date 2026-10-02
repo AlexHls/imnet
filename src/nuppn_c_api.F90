@@ -1,4 +1,5 @@
 module imyann_nuppn_c_api
+   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use iso_c_binding, only: c_char, c_double, c_int, c_null_char
    use array_sizes, only: i282dim, i325dim, iAtdim, iCfdim, nre, nsp
    use alpha_decays, only: alpha_decays_init
@@ -227,13 +228,17 @@ contains
       nuppn_integrate = unpack_xnuc(xnuc, count, yps)
       if (nuppn_integrate /= 0_c_int) return
 
-      rho = HALF * (rho0 + rho1)
+      rho = HALF * rho0 + HALF * rho1
       t9_0 = temp0_k / 1.0e9_r8
       t9_1 = temp1_k / 1.0e9_r8
       t9 = HALF * (t9_0 + t9_1)
       call calculate_ye(yps, an, zn, ye, considerisotope)
       call evaluate_all_rates(ye, nvar_saved, nvrel_saved, rho, t9, yps, nu_saved)
       dedt = energy_flux(yps)
+      if (.not. ieee_is_finite(dedt)) then
+         nuppn_integrate = -1001_c_int
+         return
+      end if
       if (dt == ZERO) then
          nuppn_integrate = 0_c_int
          return
@@ -245,6 +250,11 @@ contains
          return
       end if
 
+      if (any(.not. ieee_is_finite(yps(active_species(1:nactive)))) .or. &
+          any(yps(active_species(1:nactive)) < ZERO)) then
+         nuppn_integrate = -1001_c_int
+         return
+      end if
       last_substeps = int(nsubt, c_int)
       do i = 1, nactive
          xnuc(i) = yps(active_species(i))
@@ -292,6 +302,11 @@ contains
          call calculate_ye(yps, an, zn, ye, considerisotope)
          call evaluate_all_rates(ye, nvar_saved, nvrel_saved, rho, t9, yps, nu_saved)
          dedt = energy_flux(yps)
+         if (.not. ieee_is_finite(dedt)) then
+            last_substeps = int(total_substeps, c_int)
+            nuppn_integrate_to_time = -1001_c_int
+            return
+         end if
          call integrate_network(nvar_saved, yps, t9, t9, rho, rho, ye, dt, &
             nvrel_saved, nu_saved, ierr, time)
          if (ierr /= 0) then
@@ -300,6 +315,12 @@ contains
             return
          end if
 
+         if (any(.not. ieee_is_finite(yps(active_species(1:nactive)))) .or. &
+             any(yps(active_species(1:nactive)) < ZERO)) then
+            last_substeps = int(total_substeps, c_int)
+            nuppn_integrate_to_time = -1001_c_int
+            return
+         end if
          total_substeps = total_substeps + nsubt
          time = time + dt
          call append_history(time, rho, temp_k, dt, dedt, nsubt, yps)

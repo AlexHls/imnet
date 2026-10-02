@@ -73,6 +73,9 @@ struct IntegrationStepSnapshot {
   std::vector<double> xnuc;
 };
 
+// Reject invalid solver history before it reaches plotting or export.
+void validate_integration_snapshot(const IntegrationStepSnapshot &step, size_t species_count);
+
 /**
  * @class Network
  * @brief Wrapper around the selected nuclear network backend

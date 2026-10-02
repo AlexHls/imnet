@@ -256,7 +256,30 @@ def main():
         [binary, "--headless", "--data-dir", network, "--abundances", zero,
          "--output", work / "zero.csv"]], cwd=work, capture_output=True, timeout=30)
     assert completed.returncode != 0, "All-zero composition was accepted"
+    # Rejected integrations preserve prior exports; partial runs still export
+    # their completed history and return a failure status.
+    protected_csv, protected_json = work / "protected.csv", work / "protected.json"
+    protected_csv.write_text("previous CSV")
+    protected_json.write_text("previous JSON")
+    command = [binary, "--headless", "--data-dir", network, "--abundances", initial,
+               "--rho", "1e4", "--temp", "2e8", "--dt", "1e-6", "--dt-max", "1e-6",
+               "--final-time", "2e-6", "--output", protected_csv, "--save-state", protected_json]
+    completed = subprocess.run([str(x) for x in command + ["--max-steps", 2147483646]],
+                               cwd=work, capture_output=True, timeout=30)
+    assert completed.returncode != 0
+    assert protected_csv.read_text() == "previous CSV"
+    assert protected_json.read_text() == "previous JSON"
+    completed = subprocess.run([str(x) for x in command + ["--max-steps", 1]],
+                               cwd=work, capture_output=True, timeout=30)
+    assert completed.returncode != 0
+    with protected_csv.open() as file:
+        partial_rows = list(csv.DictReader(file))
+    assert len(partial_rows) == 2 and partial_rows[-1]["status"] == "failed"
+    assert float(partial_rows[-1]["time"]) == 1e-6
+    assert not json.loads(protected_json.read_text())["steps"][-1]["success"]
+    assert not list(work.glob(".*.tmp-*")), "Save left temporary files behind"
     state_path, csv_path = work / "headless.json", work / "headless.csv"
+    csv_path.write_text("previous CSV to replace")
     run([args.imnet.resolve(), "--headless", "--data-dir", network, "--abundances", initial,
          "--trajectory", trajectory, "--output", csv_path, "--save-state", state_path],
         work, work / "headless.log")
