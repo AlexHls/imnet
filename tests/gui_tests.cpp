@@ -5,6 +5,7 @@
 #include "ui_main_window.h"
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 static void require(bool value, const char *message) {
@@ -75,6 +76,14 @@ public:
     // Exercise the actual render path, including layout, flux arrows and plots.
     for (int i = 0; i < 3; ++i)
       window.process_frame();
+    state.view_settings().flux_threshold = std::numeric_limits<double>::quiet_NaN();
+    window.process_frame();
+    require(!window.nuclide_chart_.flux_error().empty(),
+            "Chart hid a flux failure as an empty arrow list");
+    state.view_settings().flux_threshold = 0;
+    window.process_frame();
+    require(window.nuclide_chart_.flux_error().empty(),
+            "Chart flux error did not clear after recovery");
     window.show_trajectory_plot_ = true;
     window.trajectory_plot_log_x_ = true;
     window.show_trajectory_editor_ = true;

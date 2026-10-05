@@ -124,6 +124,7 @@ void NuclideChart::build_grid() {
 }
 
 void NuclideChart::render() {
+  flux_error_.clear();
   if (!app_state_) {
     ImGui::TextDisabled("Chart not initialized");
     return;
@@ -226,6 +227,21 @@ void NuclideChart::render() {
   }
   ImGui::Separator();
 
+  std::vector<ReactionFlux> fluxes;
+  if (view_settings.show_fluxes) {
+    try {
+      fluxes = app_state_->get_reaction_fluxes(
+          view_settings.flux_threshold, view_settings.flux_arrow_metric,
+          static_cast<size_t>(std::max(1, view_settings.max_flux_arrows)),
+          view_settings.show_regular_fluxes, view_settings.show_weak_fluxes);
+    } catch (const std::exception &e) {
+      flux_error_ = std::string("Flux arrows unavailable: ") + e.what();
+      ImGui::PushTextWrapPos(0.0f);
+      ImGui::TextColored(ui_theme::danger(), "%s", flux_error_.c_str());
+      ImGui::PopTextWrapPos();
+    }
+  }
+
   ImGui::BeginChild("ChartArea", ImVec2(0, 0), true,
                     ImGuiWindowFlags_HorizontalScrollbar);
   if (reset_view) {
@@ -290,10 +306,6 @@ void NuclideChart::render() {
   double flux_max_value = 0.0;
 
   if (view_settings.show_fluxes) {
-    const auto fluxes = app_state_->get_reaction_fluxes(
-        view_settings.flux_threshold, view_settings.flux_arrow_metric,
-        static_cast<size_t>(std::max(1, view_settings.max_flux_arrows)),
-        view_settings.show_regular_fluxes, view_settings.show_weak_fluxes);
 
     double strongest_flux = 0.0;
     for (const auto &flux : fluxes) {

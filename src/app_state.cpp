@@ -120,6 +120,12 @@ bool AppState::initialize_network(const std::string &species_file,
                                   const std::string &partition_file,
                                   const std::string &mass_file,
                                   const std::string &weak_file) {
+#ifdef IMNET_USE_NUPPN
+  if (network_) {
+    std::cerr << "NuPPN cannot reload physics in this process; restart imnet to load inputs" << std::endl;
+    return false;
+  }
+#endif
   try {
     const auto old_names = species_names_;
     const auto old_settings = integration_settings_;
@@ -600,6 +606,11 @@ bool AppState::save_state_to_file(const std::string &filename) const {
     std::cerr << "Error: Cannot save state: "
               << (error.empty() ? "network metadata is incomplete" : error)
               << std::endl;
+    return false;
+  }
+
+  if (!std::isfinite(view_settings_.flux_threshold) || view_settings_.flux_threshold < 0) {
+    std::cerr << "Error: Cannot save state with invalid flux threshold" << std::endl;
     return false;
   }
 
@@ -1104,14 +1115,9 @@ AppState::get_reaction_fluxes(double min_strength, int metric,
     return {};
   }
 
-  try {
-    return network_->get_reaction_fluxes(
-        flux_state_rho_, flux_state_temp_, flux_state_xnuc_, min_strength,
-        metric, max_count,
-        include_regular, include_weak);
-  } catch (...) {
-    return {};
-  }
+  return network_->get_reaction_fluxes(
+      flux_state_rho_, flux_state_temp_, flux_state_xnuc_, min_strength,
+      metric, max_count, include_regular, include_weak);
 }
 
 void AppState::record_reaction_flux_state(double rho, double temp,

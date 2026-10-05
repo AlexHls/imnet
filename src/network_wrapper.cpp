@@ -17,6 +17,21 @@ void validate_history_budget(size_t species_count, int max_steps) {
                              std::to_string(limit) + " for this network");
   }
 }
+void validate_reaction_diagnostic(const ReactionDiagnostic &item) {
+  for (double value : {item.q_value, item.rate, item.abundance_weighted_rate,
+                       item.contribution_dYdt, item.contribution_dXdt}) {
+    if (!std::isfinite(value))
+      throw std::runtime_error("Non-finite reaction diagnostic: " + item.equation);
+  }
+}
+
+void validate_flux_strengths(double rate, double dydt, double dxdt) {
+  for (double value : {rate, dydt, dxdt}) {
+    if (!std::isfinite(value) || value < 0)
+      throw std::runtime_error("Invalid reaction flux strength (non-finite or negative)");
+  }
+}
+
 void validate_integration_snapshot(const IntegrationStepSnapshot &step, size_t species_count) {
   for (double value : {step.time, step.rho, step.temp, step.dt, step.dedt}) {
     if (!std::isfinite(value)) throw std::runtime_error("Non-finite integration history value");
@@ -175,6 +190,9 @@ NuppnReaction load_nuppn_reaction(int index) {
                          &reaction.outputs[1].count, &reaction.rate,
                          &reaction.flow, &reaction.q_value, &weak),
       "nuppn_get_reaction");
+  if (!std::isfinite(reaction.rate) || !std::isfinite(reaction.flow) ||
+      !std::isfinite(reaction.q_value))
+    throw std::runtime_error("NuPPN returned non-finite reaction data");
   reaction.weak = weak != 0;
   return reaction;
 }
@@ -383,7 +401,9 @@ double Network::get_reaction_rate(int species_index, double rho, double temp,
       nuppn_get_dxdt(rho, temp, xnuc.data(), static_cast<int>(xnuc.size()),
                      dxdt.data()),
       "nuppn_get_dxdt");
-  return dxdt[static_cast<size_t>(species_index)];
+  const double rate = dxdt[static_cast<size_t>(species_index)];
+  if (!std::isfinite(rate)) throw std::runtime_error("NuPPN returned a non-finite species rate");
+  return rate;
 }
 
 std::vector<ReactionDiagnostic> Network::get_reaction_diagnostics(
@@ -425,6 +445,7 @@ std::vector<ReactionDiagnostic> Network::get_reaction_diagnostics(
         item.contribution_dYdt *
         static_cast<double>(species_[static_cast<size_t>(species_index)].A);
     item.weak = reaction.weak;
+    validate_reaction_diagnostic(item);
     diagnostics.push_back(std::move(item));
   }
 
@@ -469,8 +490,8 @@ std::vector<ReactionFlux> Network::get_reaction_fluxes(
     const double selected_strength = metric == 2   ? strength_rate
                                      : metric == 1 ? strength_dxdt
                                                    : strength_dydt;
-    if (!std::isfinite(strength_rate) || !std::isfinite(strength_dydt) ||
-        !std::isfinite(strength_dxdt) || selected_strength <= 0.0 ||
+    validate_flux_strengths(strength_rate, strength_dydt, strength_dxdt);
+    if (selected_strength <= 0.0 ||
         source < 0 || target < 0 || source == target ||
         source >= num_species() || target >= num_species()) {
       return;
@@ -483,6 +504,7 @@ std::vector<ReactionFlux> Network::get_reaction_fluxes(
     acc.strength_rate += strength_rate;
     acc.strength_dydt += strength_dydt;
     acc.strength_dxdt += strength_dxdt;
+    validate_flux_strengths(acc.strength_rate, acc.strength_dydt, acc.strength_dxdt);
     acc.weak = weak;
     if (selected_strength >= acc.strongest_reaction || acc.equation.empty()) {
       acc.strongest_reaction = selected_strength;
@@ -986,6 +1008,7 @@ std::vector<ReactionDiagnostic> Network::get_reaction_diagnostics(
     item.contribution_dXdt =
         item.contribution_dYdt * static_cast<double>(nuc.na);
     item.weak = false;
+    validate_reaction_diagnostic(item);
     diagnostics.push_back(std::move(item));
   }
 
@@ -1007,6 +1030,7 @@ std::vector<ReactionDiagnostic> Network::get_reaction_diagnostics(
     item.contribution_dXdt =
         item.contribution_dYdt * static_cast<double>(nuc.na);
     item.weak = true;
+    validate_reaction_diagnostic(item);
     diagnostics.push_back(std::move(item));
   }
 
@@ -1058,8 +1082,8 @@ std::vector<ReactionFlux> Network::get_reaction_fluxes(
     const double selected_strength = metric == 2   ? strength_rate
                                      : metric == 1 ? strength_dxdt
                                                    : strength_dydt;
-    if (!std::isfinite(strength_rate) || !std::isfinite(strength_dydt) ||
-        !std::isfinite(strength_dxdt) || selected_strength <= 0.0 ||
+    validate_flux_strengths(strength_rate, strength_dydt, strength_dxdt);
+    if (selected_strength <= 0.0 ||
         source < 0 || target < 0 || source == target ||
         source >= static_cast<int>(nd_.nuc_count) ||
         target >= static_cast<int>(nd_.nuc_count)) {
@@ -1073,6 +1097,7 @@ std::vector<ReactionFlux> Network::get_reaction_fluxes(
     acc.strength_rate += strength_rate;
     acc.strength_dydt += strength_dydt;
     acc.strength_dxdt += strength_dxdt;
+    validate_flux_strengths(acc.strength_rate, acc.strength_dydt, acc.strength_dxdt);
     acc.weak = weak;
     if (selected_strength >= acc.strongest_reaction || acc.equation.empty()) {
       acc.strongest_reaction = selected_strength;

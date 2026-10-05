@@ -2140,26 +2140,11 @@ void MainWindow::render_file_dialogs() {
     ImGui::TextWrapped("Switching NuPPN run directories requires restarting "
                        "imnet with --data-dir. Reloading this directory does "
                        "not reload backend physics.");
-    ImGui::TextWrapped("Run directory:");
-    ImGui::InputText("##nuppn_run_dir", species_path_, sizeof(species_path_));
+    ImGui::TextWrapped("Current run directory: %s",
+                       app_state_ ? app_state_->species_file().c_str() : "(none)");
     ImGui::Separator();
-    if (ImGui::Button("Load##nuppn_run_dir", ImVec2(120, 0))) {
-      if (app_state_ && app_state_->reload_species_file(species_path_)) {
-        sync_network_path_inputs();
-        reset_ui_after_network_reload();
-        nuppn_inputs_loaded_ = load_nuppn_input_files();
-        status_message_ = std::string("Loaded NuPPN run: ") + species_path_;
-      } else {
-        status_message_ =
-            std::string("Failed to load NuPPN run: ") + species_path_;
-      }
+    if (ImGui::Button("Close##nuppn_run_dir", ImVec2(120, 0))) {
       show_open_species_popup_ = false;
-      ImGui::CloseCurrentPopup();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel##nuppn_run_dir", ImVec2(120, 0))) {
-      show_open_species_popup_ = false;
-      sync_network_path_inputs();
       ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();

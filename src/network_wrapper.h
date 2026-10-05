@@ -62,6 +62,10 @@ struct ReactionFlux {
   std::string equation;
 };
 
+// Validate values before diagnostic sorting, arrow filtering and JSON export.
+void validate_reaction_diagnostic(const ReactionDiagnostic &item);
+void validate_flux_strengths(double rate, double dydt, double dxdt);
+
 struct IntegrationStepSnapshot {
   size_t index = 0;
   double time = 0.0;

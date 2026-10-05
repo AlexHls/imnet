@@ -44,6 +44,8 @@ public:
   /**
    * @brief Get hovered isotope index (-1 if none)
    */
+  const std::string &flux_error() const { return flux_error_; }
+
   int get_hovered_isotope() const { return hovered_isotope_; }
 
   /**
@@ -63,6 +65,7 @@ public:
 
 private:
   AppState *app_state_;
+  std::string flux_error_;
   std::vector<IsotopeButton> buttons_;
   std::map<int, IsotopeButton> button_map_; // index -> button
 

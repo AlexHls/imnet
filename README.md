@@ -390,6 +390,9 @@ Rules:
   for imnet trajectory runs, so changing-condition results can differ from earlier
   versions.
 
+Flux calculation failures appear as “Flux arrows unavailable” in the chart;
+non-finite diagnostics and fluxes are rejected rather than drawn or exported.
+
 ## Output Files
 
 Headless CSV output has this schema:
@@ -435,7 +438,8 @@ JSON state export contains:
 - The application treats backend source as external, but the NuPPN build system
   itself may update generated files inside the supplied NuPPN checkout.
 - NuPPN keeps process-global backend state; restart the application to switch
-  to a different NuPPN run directory.
+  run directories or reload edited physics inputs. Reload requests are rejected
+  without changing the current session.
 - Numerical results depend on backend version, rate files, species set,
   timestep controls, and input units. Record these with published runs.
 - The GUI is an inspection tool, not a provenance system. Use headless commands

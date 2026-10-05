@@ -188,6 +188,12 @@ int main() {
   cached_json << cached_export.rdbuf();
   require(cached_json.str() == json.str());
 
+  // View metadata must not introduce NaN into otherwise valid JSON.
+  const double saved_threshold = state.view_settings().flux_threshold;
+  state.view_settings().flux_threshold = std::numeric_limits<double>::quiet_NaN();
+  require(!state.save_state_to_file(saved_state.string()));
+  state.view_settings().flux_threshold = saved_threshold;
+
   // Failed exports must not truncate an existing result.
   state.clear_trajectory_cache();
   settings.temp = std::numeric_limits<double>::quiet_NaN();

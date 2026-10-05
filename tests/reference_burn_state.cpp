@@ -32,6 +32,37 @@ int main(int argc, char **argv) {
       catch (const std::exception &) { rejected = true; }
       require(rejected, "Invalid solver history accepted");
     }
+    imyann::ReactionDiagnostic diagnostic;
+    diagnostic.q_value = -1;
+    diagnostic.contribution_dYdt = diagnostic.contribution_dXdt = -2;
+    imyann::validate_reaction_diagnostic(diagnostic);
+    for (auto field : {&imyann::ReactionDiagnostic::q_value,
+                       &imyann::ReactionDiagnostic::rate,
+                       &imyann::ReactionDiagnostic::abundance_weighted_rate,
+                       &imyann::ReactionDiagnostic::contribution_dYdt,
+                       &imyann::ReactionDiagnostic::contribution_dXdt}) {
+      for (double invalid : {std::numeric_limits<double>::quiet_NaN(),
+                             std::numeric_limits<double>::infinity()}) {
+        auto bad = diagnostic;
+        bad.*field = invalid;
+        bool rejected = false;
+        try { imyann::validate_reaction_diagnostic(bad); }
+        catch (const std::exception &) { rejected = true; }
+        require(rejected, "Invalid reaction diagnostic accepted");
+      }
+    }
+    imyann::validate_flux_strengths(0, 1, 2);
+    const double maximum = std::numeric_limits<double>::max();
+    for (int field = 0; field < 3; ++field) {
+      for (double invalid : {std::numeric_limits<double>::quiet_NaN(), maximum + maximum, -1.0}) {
+        double values[] = {1, 1, 1};
+        values[field] = invalid;
+        bool rejected = false;
+        try { imyann::validate_flux_strengths(values[0], values[1], values[2]); }
+        catch (const std::exception &) { rejected = true; }
+        require(rejected, "Invalid or overflowing flux accepted");
+      }
+    }
     require(argc == 5, "Usage: imnet_reference_state data initial trajectory output");
     imyann::AppState app;
     const std::filesystem::path data(argv[1]);
@@ -89,6 +120,10 @@ int main(int argc, char **argv) {
                                        true, true).empty(), "Arrow threshold ignored");
       }
     }
+    bool flux_error = false;
+    try { app.get_reaction_fluxes(std::numeric_limits<double>::quiet_NaN(), 0); }
+    catch (const std::exception &) { flux_error = true; }
+    require(flux_error, "Flux failure was silently converted into an empty arrow list");
     const auto saved_size = cache.size();
     const auto saved_final = cache.back().xnuc;
     const auto saved_x = app.integration_settings().xnuc;
@@ -99,6 +134,13 @@ int main(int argc, char **argv) {
     require(cache.size() == saved_size && cache.back().xnuc == saved_final &&
             app.integration_settings().xnuc == saved_x && app.current_time() == saved_time,
             "Rejected run destroyed existing results");
+#ifdef IMNET_USE_NUPPN
+    require(!app.reload_species_file(data.string()), "NuPPN falsely reported successful reload");
+    require(!app.reload_rate_files("", "", "", ""), "NuPPN falsely reported rate reload");
+    require(cache.size() == saved_size && cache.back().xnuc == saved_final &&
+            app.integration_settings().xnuc == saved_x && app.current_time() == saved_time,
+            "Rejected NuPPN reload destroyed the current session");
+#endif
     auto direct_x = saved_x;
     bool rejected = false;
     try {
