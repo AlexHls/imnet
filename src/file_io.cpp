@@ -188,48 +188,92 @@ bool parse_trajectory_metadata(const std::string &line,
 
 } // namespace
 
-bool write_file_atomic(const std::string &filename,
-                       const std::function<void(std::ostream &)> &write) {
+bool write_files_transactional(const std::vector<FileWrite> &files, std::string &error) {
   namespace fs = std::filesystem;
-  fs::path staging;
+  struct StagedFile {
+    fs::path target, directory;
+    bool existed = false;
+    bool committed = false;
+    bool retain_backup = false;
+  };
+  std::vector<StagedFile> staged;
+  error.clear();
   bool saved = false;
   try {
-    fs::path target(filename);
-    // Follow existing links, as ordinary file saves do, without replacing the link.
-    if (fs::is_symlink(target)) target = fs::canonical(target);
-    const bool exists = fs::exists(target);
-    if (exists && !fs::is_regular_file(target))
-      throw std::runtime_error("Destination is not a regular file");
-    std::random_device random;
-    for (int attempt = 0; attempt < 100; ++attempt) {
-      const auto candidate = target.parent_path() /
-          ("." + target.filename().string() + ".tmp-" + std::to_string(random()));
-      // Creating the directory reserves a unique name without opening someone
-      // else's temporary file. Its contents stay on the destination filesystem.
-      if (fs::create_directory(candidate)) {
-        staging = candidate;
-        break;
+    staged.reserve(files.size());
+    for (const auto &file : files) {
+      fs::path target(file.filename);
+      // Follow existing symlinks, preserving the link itself.
+      if (fs::is_symlink(target)) target = fs::canonical(target);
+      target = fs::weakly_canonical(target);
+      const bool exists = fs::exists(target);
+      if (exists && !fs::is_regular_file(target))
+        throw std::runtime_error("Destination is not a regular file: " + target.string());
+      for (const auto &previous : staged) {
+        if (target == previous.target ||
+            (exists && previous.existed && fs::equivalent(target, previous.target)))
+          throw std::runtime_error("Duplicate save destination: " + target.string());
       }
+      staged.push_back({target, {}, exists});
+      auto &entry = staged.back();
+      std::random_device random;
+      for (int attempt = 0; attempt < 100; ++attempt) {
+        const auto candidate = target.parent_path() /
+            ("." + target.filename().string() + ".tmp-" + std::to_string(random()));
+        if (fs::create_directory(candidate)) {
+          entry.directory = candidate;
+          break;
+        }
+      }
+      if (entry.directory.empty()) throw std::runtime_error("Cannot reserve temporary file");
+      fs::permissions(entry.directory, fs::perms::owner_all);
+      // Single-file replacement needs no rollback after its one successful rename.
+      if (files.size() > 1 && exists)
+        fs::copy_file(target, entry.directory / "previous");
+      const auto temporary = entry.directory / "output";
+      std::ofstream out(temporary, std::ios::binary);
+      out.exceptions(std::ios::failbit | std::ios::badbit);
+      file.write(out);
+      out.close();
+      if (exists) fs::permissions(temporary, fs::status(target).permissions());
     }
-    if (staging.empty()) throw std::runtime_error("Cannot reserve temporary file");
-    fs::permissions(staging, fs::perms::owner_all);
-    const auto temporary = staging / "output";
-    std::ofstream out(temporary, std::ios::binary);
-    out.exceptions(std::ios::failbit | std::ios::badbit);
-    write(out);
-    out.close();
-    if (exists) fs::permissions(temporary, fs::status(target).permissions());
-    fs::rename(temporary, target);
+    for (auto &entry : staged) {
+      fs::rename(entry.directory / "output", entry.target);
+      entry.committed = true;
+    }
     saved = true;
   } catch (const std::exception &e) {
-    std::cerr << "Error saving " << filename << ": " << e.what() << std::endl;
+    error = e.what();
+    for (auto it = staged.rbegin(); it != staged.rend(); ++it) {
+      if (!it->committed) continue;
+      std::error_code rollback_error;
+      if (it->existed)
+        fs::rename(it->directory / "previous", it->target, rollback_error);
+      else
+        fs::remove(it->target, rollback_error);
+      if (rollback_error) {
+        it->retain_backup = true;
+        error += "; rollback failed for " + it->target.string() + ": " + rollback_error.message() +
+                 "; recovery files retained in " + it->directory.string();
+      }
+    }
   }
-  if (!staging.empty()) {
+  for (const auto &entry : staged) {
+    if (entry.directory.empty() || entry.retain_backup) continue;
     std::error_code ignored;
-    fs::remove(staging / "output", ignored);
-    fs::remove(staging, ignored);
+    fs::remove(entry.directory / "output", ignored);
+    fs::remove(entry.directory / "previous", ignored);
+    fs::remove(entry.directory, ignored);
   }
   return saved;
+}
+
+bool write_file_atomic(const std::string &filename,
+                       const std::function<void(std::ostream &)> &write) {
+  std::string error;
+  if (write_files_transactional({{filename, write}}, error)) return true;
+  std::cerr << "Error saving " << filename << ": " << error << std::endl;
+  return false;
 }
 
 bool save_abundances(const std::string &filename,

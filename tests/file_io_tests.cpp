@@ -53,5 +53,53 @@ int main() {
   const auto previous = read();
   require(!imyann::save_trajectory(target.string(), {1, 0}, {1e4, 1e4}, {2e8, 2e8}));
   require(read() == previous);
+  const auto group = directory / "group";
+  fs::create_directory(group);
+  const auto first = group / "first", second = group / "second", third = group / "third";
+  auto contents = [](const fs::path &path) {
+    std::ifstream in(path);
+    return std::string(std::istreambuf_iterator<char>(in), {});
+  };
+  auto writes = [&] {
+    return std::vector<imyann::FileWrite>{
+        {first.string(), [](auto &out) { out << "new first"; }},
+        {second.string(), [](auto &out) { out << "new second"; }},
+        {third.string(), [](auto &out) { out << "new third"; }}};
+  };
+  std::string error;
+  require(write_file_atomic(first.string(), [](auto &out) { out << "old first"; }));
+  fs::permissions(first, fs::perms::owner_read | fs::perms::owner_write);
+  const auto original_permissions = fs::status(first).permissions();
+  // Late staging failures must not touch any destination.
+  auto batch = writes();
+  batch.back().write = [](auto &out) { out << "partial"; out.setstate(std::ios::badbit); };
+  require(!imyann::write_files_transactional(batch, error) && !error.empty());
+  require(contents(first) == "old first" && !fs::exists(second) && !fs::exists(third));
+  require(std::distance(fs::directory_iterator(group), fs::directory_iterator{}) == 1);
+  // Force the third rename to fail after two replacements succeeded. Restore
+  // the first file and remove the newly-created second file during rollback.
+  batch = writes();
+  batch.back().write = [&](auto &out) { out << "third"; fs::create_directory(third); };
+  require(!imyann::write_files_transactional(batch, error) && !error.empty());
+  require(contents(first) == "old first" && !fs::exists(second) && fs::is_directory(third));
+  require(fs::status(first).permissions() == original_permissions);
+  require(std::distance(fs::directory_iterator(group), fs::directory_iterator{}) == 2);
+  fs::remove(third);
+  require(imyann::write_files_transactional(writes(), error) && error.empty());
+  require(contents(first) == "new first" && contents(second) == "new second" &&
+          contents(third) == "new third");
+  require(fs::status(first).permissions() == original_permissions);
+  require(std::distance(fs::directory_iterator(group), fs::directory_iterator{}) == 3);
+  // Aliased destinations cannot accidentally overwrite one another in a group.
+  const auto alias = group / "alias";
+  fs::create_symlink(first, alias);
+  batch = writes();
+  batch.back().filename = alias.string();
+  require(!imyann::write_files_transactional(batch, error));
+  require(contents(first) == "new first" && fs::is_symlink(alias));
+  batch = writes();
+  batch.front().filename = alias.string();
+  require(imyann::write_files_transactional(batch, error));
+  require(fs::is_symlink(alias));
   fs::remove_all(directory);
 }

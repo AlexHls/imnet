@@ -439,7 +439,10 @@ JSON state export contains:
   itself may update generated files inside the supplied NuPPN checkout.
 - NuPPN keeps process-global backend state; restart the application to switch
   run directories or reload edited physics inputs. Reload requests are rejected
-  without changing the current session.
+  without changing the current session. Saving the three input files stages all
+  three before replacement and rolls back on failure. If rollback fails, the GUI
+  reports retained recovery files. This protects against ordinary save failures;
+  the group is not atomic against crashes or concurrent readers.
 - Numerical results depend on backend version, rate files, species set,
   timestep controls, and input units. Record these with published runs.
 - The GUI is an inspection tool, not a provenance system. Use headless commands

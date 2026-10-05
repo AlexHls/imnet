@@ -679,8 +679,6 @@ void MainWindow::render_docking_layout() {
       if (ImGui::Button("Save Input Files##nuppn_inputs", ImVec2(170, 0))) {
         if (save_nuppn_input_files()) {
           status_message_ = "NuPPN input files saved";
-        } else {
-          status_message_ = "Could not save all NuPPN inputs; some files may have been updated.";
         }
       }
       ImGui::EndDisabled();
@@ -2440,15 +2438,17 @@ bool MainWindow::save_nuppn_input_files() {
     return false;
   }
 
-  auto save_file = [](const std::filesystem::path &path, const char *buffer) {
-    return write_file_atomic(path.string(),
-                             [&](std::ostream &out) { out << buffer; });
-  };
-
   const std::filesystem::path run_dir = app_state_->species_file();
-  return save_file(run_dir / "ppn_frame.input", nuppn_frame_input_) &&
-         save_file(run_dir / "ppn_physics.input", nuppn_physics_input_) &&
-         save_file(run_dir / "ppn_solver.input", nuppn_solver_input_);
+  std::string error;
+  const bool saved = write_files_transactional({
+      {(run_dir / "ppn_frame.input").string(),
+       [&](std::ostream &out) { out << nuppn_frame_input_; }},
+      {(run_dir / "ppn_physics.input").string(),
+       [&](std::ostream &out) { out << nuppn_physics_input_; }},
+      {(run_dir / "ppn_solver.input").string(),
+       [&](std::ostream &out) { out << nuppn_solver_input_; }}}, error);
+  if (!saved) status_message_ = "Could not complete NuPPN input save: " + error;
+  return saved;
 }
 #endif
 
