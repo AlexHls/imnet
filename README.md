@@ -437,6 +437,13 @@ JSON state export contains:
   should not include proprietary Yann or NuPPN source code.
 - The application treats backend source as external, but the NuPPN build system
   itself may update generated files inside the supplied NuPPN checkout.
+- On macOS/Linux, NuPPN inputs are first initialized in a separate startup checker.
+  A clean exit plus an explicit completion marker are required; Fortran STOP,
+  crashes and a 120-second timeout become errors with captured diagnostics.
+  Keep `imnet_nuppn_probe` beside `imnet` when copying a build; installation includes
+  both executables. Startup initializes the backend twice, once in the checker.
+  This is a preflight check, not isolation of the running solver: input files must
+  remain unchanged between the check and initialization in the application.
 - NuPPN keeps process-global backend state; restart the application to switch
   run directories or reload edited physics inputs. Reload requests are rejected
   without changing the current session. Saving the three input files stages all

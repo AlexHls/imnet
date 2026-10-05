@@ -67,7 +67,7 @@ else()
         VERBATIM
     )
 
-    add_library(libnetwork STATIC nuppn_c_api.F90)
+    add_library(libnetwork STATIC nuppn_c_api.F90 nuppn_preflight.cpp)
     add_dependencies(libnetwork nuppn_external)
     target_include_directories(libnetwork PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -205,4 +205,22 @@ if(BUILD_TESTING)
     add_executable(imnet_file_io_tests ${CMAKE_SOURCE_DIR}/tests/file_io_tests.cpp file_io.cpp)
     target_include_directories(imnet_file_io_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME imnet_file_io_tests COMMAND imnet_file_io_tests)
+endif()
+
+if(IMNET_NETWORK_BACKEND STREQUAL "NUPPN")
+    add_executable(imnet_nuppn_probe nuppn_probe.cpp)
+    target_link_libraries(imnet_nuppn_probe PRIVATE libnetwork)
+    foreach(consumer imnet imnet_reference_state imnet_gui_tests)
+        if(TARGET ${consumer})
+            add_dependencies(${consumer} imnet_nuppn_probe)
+        endif()
+    endforeach()
+    install(TARGETS imnet_nuppn_probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+if(BUILD_TESTING AND UNIX)
+    add_executable(imnet_preflight_tests ${CMAKE_SOURCE_DIR}/tests/nuppn_preflight_tests.cpp nuppn_preflight.cpp)
+    target_include_directories(imnet_preflight_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME imnet_preflight_tests COMMAND imnet_preflight_tests)
+    set_tests_properties(imnet_preflight_tests PROPERTIES TIMEOUT 15)
 endif()

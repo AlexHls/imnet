@@ -2,6 +2,7 @@
 #include "app_state.h"
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -67,6 +68,16 @@ int main(int argc, char **argv) {
     imyann::AppState app;
     const std::filesystem::path data(argv[1]);
 #ifdef IMNET_USE_NUPPN
+    // A native STOP during a failed initialization must leave this process able
+    // to load valid inputs afterward. All inputs here belong to the isolated run.
+    const auto solver_path = data / "ppn_solver.input";
+    std::ifstream solver_file(solver_path, std::ios::binary);
+    const std::string original_solver((std::istreambuf_iterator<char>(solver_file)), {});
+    require(!original_solver.empty(), "Cannot read solver fixture");
+    { std::ofstream invalid(solver_path); invalid << "&ppn_solver irdn = 99 /\n"; }
+    const bool invalid_loaded = app.initialize_network(data.string(), "", "", "", "");
+    { std::ofstream restored(solver_path, std::ios::binary); restored << original_solver; }
+    require(!invalid_loaded && !app.has_network(), "Malformed initialization poisoned parent process");
     require(app.initialize_network(data.string(), "", "", "", ""), "Network initialization failed");
 #else
     require(app.initialize_network((data / "species.txt").string(),

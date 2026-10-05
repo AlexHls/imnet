@@ -294,12 +294,44 @@ def main():
             assert completed.returncode != 0 and "requires ../NPDATA" in completed.stderr
         finally:
             backup.rename(npdata)
+    if args.backend == "NUPPN":
+        # Real malformed native inputs must never report a successful imnet run,
+        # including the solver's STOP-with-zero-exit-status validation path.
+        for name, text in (("ppn_frame.input", "&ppn_frame t9 = 'invalid' /\n"),
+                           ("ppn_solver.input", "&ppn_solver irdn = 99 /\n"),
+                           ("ppn_physics.input", "&ppn_physics unknown_knob = 1 /\n"),
+                           ("isotopedatabase.txt", "malformed database\n")):
+            path = network / name
+            original = path.read_bytes()
+            invalid_export = work / "invalid.json"
+            invalid_export.write_text("previous result")
+            try:
+                path.write_text(text)
+                completed = subprocess.run([str(binary), "--headless", "--data-dir", str(network),
+                    "--abundances", str(initial), "--save-state", str(invalid_export)],
+                    cwd=work, capture_output=True, text=True, timeout=30)
+                assert completed.returncode != 0
+                assert "NuPPN startup check failed" in completed.stderr, completed.stderr
+                assert invalid_export.read_text() == "previous result"
+            finally:
+                path.write_bytes(original)
     single = work / "single.json"
     run([binary, "--headless", "--data-dir", network, "--abundances", initial,
          "--rho", "1e4", "--temp", "2e8", "--dt", "1e-6", "--save-state", single],
         work, work / "single.log")
     single_state = json.loads(single.read_text())
     assert single_state["steps"][0]["time"] == 1e-6
+    if args.backend == "NUPPN":
+        # The checker is found beside the executable, not at a baked-in build path.
+        relocated = work / "relocated binaries"
+        relocated.mkdir()
+        for name in ("imnet", "imnet_nuppn_probe"):
+            shutil.copy2(binary.parent / name, relocated / name)
+        run([relocated / "imnet", "--headless", "--data-dir", network, "--abundances", initial,
+             "--rho", "1e4", "--temp", "2e8", "--dt", "1e-6",
+             "--save-state", work / "relocated.json"], work, work / "relocated.log")
+        assert json.loads((work / "relocated.json").read_text())["steps"] == single_state["steps"]
+
     zero = work / "zero.txt"
     zero.write_text("p 0\n")
     completed = subprocess.run([str(x) for x in

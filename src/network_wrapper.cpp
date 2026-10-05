@@ -46,6 +46,7 @@ void validate_integration_snapshot(const IntegrationStepSnapshot &step, size_t s
 
 
 #ifdef IMNET_USE_NUPPN
+#include "nuppn_preflight.h"
 
 #include <algorithm>
 #include <cctype>
@@ -273,6 +274,8 @@ Network::Network(const std::string &species_file,
     throw std::runtime_error(
         "NuPPN backend is already initialized; restart to change run directory");
   }
+
+  if (first_run_dir.empty()) check_nuppn_startup(run_dir_, nuppn_probe_path());
 
   ScopedCurrentPath cwd(run_dir_);
   check_nuppn_status(nuppn_init(), "nuppn_init");
