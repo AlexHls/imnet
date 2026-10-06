@@ -142,6 +142,8 @@ private:
 
   struct TrajectoryIntegrationJob {
     bool active = false;
+    bool final_time_run = false;
+    double initial_dt = 0.0;
     bool failed = false;
     bool complete = false;
     size_t current_step = 0;
@@ -226,7 +228,8 @@ private:
   /**
    * @brief Start non-blocking trajectory integration
    */
-  void start_trajectory_integration_job();
+  void start_final_time_integration_job();
+  void start_trajectory_integration_job(bool final_time_run = false);
 
   /**
    * @brief Stop non-blocking trajectory integration

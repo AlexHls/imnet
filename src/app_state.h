@@ -168,6 +168,10 @@ public:
   /**
    * @brief Integrate at fixed rho/T until final_time
    */
+  // Build a constant-condition time grid without running the solver. Rejecting
+  // a plan leaves the current composition and trajectory untouched.
+  bool prepare_final_time_trajectory(bool normalize_before, std::string &error);
+
   bool run_to_time(bool normalize_before, std::string &error);
 
   /**
@@ -376,6 +380,7 @@ private:
   std::string last_status_ = "current";
   std::string last_error_;
 
+  bool validate_final_time_settings(std::string &error) const;
   void invalidate_trajectory_cache();
   bool validate_composition(std::string &error) const;
   bool validate_trajectory_arrays(const std::vector<double> &times,

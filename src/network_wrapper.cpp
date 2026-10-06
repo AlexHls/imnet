@@ -886,9 +886,7 @@ double Network::integrate_to_time(double rho, double temp,
       history.push_back({static_cast<size_t>(steps + 1), time, rho, temp,
                          step_dt, dedt, last_substeps_, xnuc});
       const double grown = step_dt * dt_factor;
-      next_dt =
-          std::min(std::isfinite(grown) && grown > 0.0 ? grown : max_dt,
-                   max_dt);
+      next_dt = std::min(grown, max_dt);
     }
   } catch (...) {
     last_substeps_ = steps;

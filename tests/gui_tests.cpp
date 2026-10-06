@@ -17,6 +17,7 @@ namespace imyann {
 class MainWindowTest {
 public:
   static void run(AppState &state) {
+    const auto initial_composition = state.integration_settings().xnuc;
     MainWindow window(1600, 900, "imnet GUI regression");
     glfwHideWindow(window.native_window());
     window.set_app_state(&state, 2);
@@ -94,6 +95,61 @@ public:
     window.refresh_isotope_diagnostics(0);
     require(!window.isotope_info_error_.empty(),
             "Diagnostic error was hidden as zero");
+
+    // Final-time GUI runs yield between steps and match the headless integrator.
+    auto &settings = state.integration_settings();
+    settings.xnuc = initial_composition;
+    settings.rho = 1e4;
+    settings.temp = 2e8;
+    settings.dt = 0.001;
+    settings.dt_max = 0.008;
+    settings.dt_factor = 2;
+    settings.final_time = 0.021;
+    settings.max_steps = 32;
+    require(state.run_to_time(false, error), "Headless final-time comparison failed");
+    const auto expected_history = state.trajectory_cache();
+    settings.xnuc = initial_composition;
+    window.normalize_before_integrate_ = false;
+    window.run_mode_ = 1;
+    state.view_settings().max_cached_trajectory_steps = 2;
+    window.start_final_time_integration_job();
+    require(window.trajectory_job_.active && state.trajectory_cache().size() == 1,
+            "Starting a final-time run performed solver work synchronously");
+    finish();
+    require(state.trajectory_cache().size() == expected_history.size(),
+            "Final-time history was limited by the trajectory cache window");
+    for (size_t row = 0; row < expected_history.size(); ++row) {
+      const auto &actual = state.trajectory_cache()[row];
+      const auto &expected = expected_history[row];
+      require(std::abs(actual.time - expected.time) < 1e-14, "Final-time grid differs");
+      for (size_t i = 0; i < actual.xnuc.size(); ++i)
+        require(std::abs(actual.xnuc[i] - expected.xnuc[i]) < 1e-12 + 1e-10 * expected.xnuc[i],
+                "GUI final-time composition differs from headless");
+    }
+    require(settings.dt == 0.001 && state.current_time() == settings.final_time,
+            "Completed final-time run changed initial dt or selected the wrong row");
+    settings.dt = settings.dt_max = 1.0 / 1024;
+    settings.dt_factor = 1;
+    settings.final_time = 0.125;
+    settings.max_steps = 128;
+    window.start_final_time_integration_job();
+    window.process_frame();
+    require(window.trajectory_job_.active && window.trajectory_job_.current_step > 0 &&
+            window.trajectory_job_.current_step <= 32,
+            "Final-time run did not respect the frame batch limit");
+    const auto partial = state.trajectory_cache();
+    const auto partial_time = state.current_time();
+    window.cancel_trajectory_integration_job();
+    window.process_frame();
+    require(!window.trajectory_job_.active && state.trajectory_cache().size() == partial.size() &&
+            state.current_time() == partial_time && settings.xnuc == partial.back().xnuc,
+            "Cancelled final-time run lost results or continued running");
+    settings.max_steps = 1;
+    window.start_final_time_integration_job();
+    require(!window.trajectory_job_.active && state.current_time() == partial_time &&
+            state.trajectory_cache().size() == partial.size(),
+            "Invalid final-time plan destroyed previous results");
+
   }
 };
 } // namespace imyann

@@ -175,6 +175,23 @@ int main(int argc, char **argv) {
     require(!app.run_to_time(false, error), "Step limit was ignored");
     require(app.trajectory_cache().size() == 2 && app.current_time() == 1e-6 &&
             !app.trajectory_cache().back().success, "Partial results were lost");
+    const auto previous_size = app.trajectory_cache().size();
+    const auto previous_time = app.current_time();
+    const auto previous_x = settings.xnuc;
+    settings.dt = 1e-200;
+    settings.dt_factor = 1e-200;
+    settings.dt_max = settings.final_time = 1;
+    settings.max_steps = 4;
+    require(!app.prepare_final_time_trajectory(true, error), "Underflowing plan was accepted");
+    require(app.current_time() == previous_time && settings.xnuc == previous_x &&
+            app.trajectory_cache().size() == previous_size, "Rejected plan changed results");
+    settings.dt = 0.25;
+    settings.dt_factor = 2;
+    settings.dt_max = 0.5;
+    settings.final_time = 0.875;
+    require(app.prepare_final_time_trajectory(false, error), "Valid final-time plan rejected");
+    require(app.trajectory_times() == std::vector<double>({0, 0.25, 0.75, 0.875}),
+            "Final-time plan ignored growth, maximum dt or final clipping");
     std::cout << "Cached-step browsing and all three flux metrics passed\n";
     return 0;
   } catch (const std::exception &e) {

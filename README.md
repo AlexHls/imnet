@@ -245,6 +245,14 @@ Common workflow:
 5. Press `Run`.
 6. Inspect cached steps in `Workflow -> Cached Steps`.
 
+GUI final-time runs update progress and plots between batches of timesteps.
+`Cancel Run` retains completed results for inspection and export. These runs
+retain their full history regardless of the trajectory cache-window setting,
+and preserve the initial timestep input. Invalid timestep plans, including a
+step limit too small to reach the final time, are rejected before replacing
+existing results. Individual backend calls are still synchronous and may pause
+the window until they return.
+
 Useful views:
 
 - `View -> Trajectory Plot` shows `rho(t)` and `T(t)`.

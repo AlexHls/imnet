@@ -838,28 +838,6 @@ void MainWindow::render_single_step_controls() {
           }
         };
 
-        auto run_final_time = [&]() {
-          std::string error;
-          if (app_state_->run_to_time(normalize_before_integrate_, error)) {
-            cancel_trajectory_integration_job();
-            const auto &cache = app_state_->trajectory_cache();
-            if (!cache.empty()) {
-              last_dedt_ = cache.back().dedt;
-            }
-            trajectory_step_ui_ =
-                static_cast<int>(app_state_->current_trajectory_step());
-            const int substeps =
-                app_state_->get_network()
-                    ? app_state_->get_network()->last_substeps()
-                    : 0;
-            status_message_ = "Final-time integration completed, substeps: " +
-                              std::to_string(substeps);
-            refresh_selected_isotope();
-          } else {
-            status_message_ = "Final-time integration failed: " + error;
-          }
-        };
-
         ImGui::TextWrapped("Run mode");
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::Combo("##run_mode", &run_mode_, run_modes,
@@ -869,11 +847,16 @@ void MainWindow::render_single_step_controls() {
           ImGui::TextWrapped("Advances by dt. Use Final time to record a "
                              "plottable burn history.");
         if (run_mode_ == 1)
-          ImGui::TextWrapped("Runs synchronously; the window may pause until "
-                             "the solver finishes.");
+          ImGui::TextWrapped("Updates between timesteps; Cancel keeps completed results. "
+                             "An individual solver call may still pause the window.");
 
+        if (trajectory_job_.active && trajectory_job_.final_time_run) {
+          const float progress = static_cast<float>(trajectory_job_.current_step) /
+                                 std::max(size_t(1), trajectory_job_.target_end_step);
+          ImGui::ProgressBar(progress, ImVec2(-1.0f, 0));
+        }
         if (trajectory_job_.active) {
-          if (ImGui::Button("Cancel Trajectory Run", ImVec2(-1.0f, 0))) {
+          if (ImGui::Button("Cancel Run", ImVec2(-1.0f, 0))) {
             cancel_trajectory_integration_job();
           }
         } else {
@@ -886,7 +869,7 @@ void MainWindow::render_single_step_controls() {
             if (run_mode_ == 0) {
               run_fixed_timestep();
             } else if (run_mode_ == 1) {
-              run_final_time();
+              start_final_time_integration_job();
             } else {
               start_trajectory_integration_job();
             }
@@ -1269,14 +1252,26 @@ void MainWindow::render_trajectory_controls() {
   }
 }
 
-void MainWindow::start_trajectory_integration_job() {
+void MainWindow::start_final_time_integration_job() {
+  if (!app_state_) return;
+  std::string error;
+  if (!app_state_->prepare_final_time_trajectory(normalize_before_integrate_, error)) {
+    status_message_ = "Final-time integration cannot start: " + error;
+    return;
+  }
+  trajectory_step_ui_ = 0;
+  start_trajectory_integration_job(true);
+  show_abundance_plot_ = true;
+}
+
+void MainWindow::start_trajectory_integration_job(bool final_time_run) {
   if (!app_state_ || !app_state_->has_trajectory() ||
       !app_state_->has_network()) {
     status_message_ = "Cannot start trajectory integration";
     return;
   }
 
-  if (normalize_before_integrate_ && !app_state_->normalize_abundances()) {
+  if (!final_time_run && normalize_before_integrate_ && !app_state_->normalize_abundances()) {
     status_message_ = "Could not normalize abundances";
     return;
   }
@@ -1289,16 +1284,18 @@ void MainWindow::start_trajectory_integration_job() {
 
   trajectory_job_ = TrajectoryIntegrationJob();
   trajectory_job_.active = true;
+  trajectory_job_.final_time_run = final_time_run;
+  trajectory_job_.initial_dt = app_state_->integration_settings().dt;
   trajectory_job_.initial_xnuc = app_state_->integration_settings().xnuc;
   trajectory_job_.xnuc = trajectory_job_.initial_xnuc;
   retarget_trajectory_integration_job();
 
-  status_message_ = "Background trajectory integration started";
+  status_message_ = final_time_run ? "Final-time integration started" : "Trajectory integration started";
 }
 
 void MainWindow::cancel_trajectory_integration_job() {
   if (trajectory_job_.active) {
-    status_message_ = "Background trajectory integration cancelled";
+    status_message_ = "Integration cancelled; completed results retained";
   }
   trajectory_job_ = TrajectoryIntegrationJob();
 }
@@ -1314,7 +1311,7 @@ void MainWindow::retarget_trajectory_integration_job() {
     return;
   }
 
-  const size_t max_cached_steps = static_cast<size_t>(
+  const size_t max_cached_steps = trajectory_job_.final_time_run ? loaded_steps : static_cast<size_t>(
       std::max(1, app_state_->view_settings().max_cached_trajectory_steps));
   const size_t center = static_cast<size_t>(
       std::clamp(trajectory_step_ui_, 0, static_cast<int>(loaded_steps - 1)));
@@ -1357,6 +1354,8 @@ void MainWindow::retarget_trajectory_integration_job() {
       trajectory_job_.current_step >= trajectory_job_.target_end_step;
   trajectory_job_.active = !trajectory_job_.complete;
   app_state_->set_trajectory_cache(trajectory_job_.cache, center);
+  if (trajectory_job_.final_time_run)
+    app_state_->integration_settings().dt = trajectory_job_.initial_dt;
 }
 
 void MainWindow::process_trajectory_integration_job() {
@@ -1445,14 +1444,18 @@ void MainWindow::process_trajectory_integration_job() {
                          trajectory_job_.cache_start_step,
                          trajectory_job_.cache_end_step);
 
+  if (trajectory_job_.final_time_run)
+    trajectory_step_ui_ = static_cast<int>(trajectory_job_.current_step);
   const size_t selected_step = static_cast<size_t>(
       std::clamp(trajectory_step_ui_, 0, static_cast<int>(loaded_steps - 1)));
   app_state_->set_trajectory_cache(trajectory_job_.cache, selected_step);
+  if (trajectory_job_.final_time_run)
+    app_state_->integration_settings().dt = trajectory_job_.initial_dt;
 
   if (trajectory_job_.current_step >= trajectory_job_.target_end_step) {
     trajectory_job_.active = false;
     trajectory_job_.complete = true;
-    status_message_ = "Trajectory cache window integrated";
+    status_message_ = trajectory_job_.final_time_run ? "Final-time integration completed" : "Trajectory cache window integrated";
   }
 }
 

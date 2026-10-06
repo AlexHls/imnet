@@ -338,28 +338,19 @@ bool AppState::integrate_single_step(bool normalize_before, double &dedt,
   }
 }
 
-bool AppState::run_to_time(bool normalize_before, std::string &error) {
+bool AppState::validate_final_time_settings(std::string &error) const {
   error.clear();
-  last_dedt_ = 0.0;
-  last_success_ = false;
-  last_status_ = "failed";
-  last_error_.clear();
-
   try {
     validate_history_budget(species_names_.size(), integration_settings_.max_steps);
   } catch (const std::exception &e) {
     error = e.what();
-    last_error_ = error;
     return false;
   }
 
   if (!validate_integration_settings(error)) {
-    last_error_ = error;
     return false;
   }
 
-  const double rho = integration_settings_.rho;
-  const double temp = integration_settings_.temp;
   const double final_time = integration_settings_.final_time;
   const double dt_max = integration_settings_.dt_max;
   const double dt_factor = integration_settings_.dt_factor;
@@ -376,9 +367,66 @@ bool AppState::run_to_time(bool normalize_before, std::string &error) {
     error = "Max steps must be positive and leave room for the initial row";
   }
   if (!error.empty()) {
+    return false;
+  }
+
+  return true;
+}
+
+bool AppState::prepare_final_time_trajectory(bool normalize_before, std::string &error) {
+  if (!validate_final_time_settings(error)) return false;
+  try {
+    const auto &settings = integration_settings_;
+    auto initial = settings.xnuc;
+    if (normalize_before && !normalize_composition(initial, settings.fixed)) {
+      error = "Could not normalize abundances";
+      return false;
+    }
+    std::vector<double> times{0.0};
+    double next_dt = std::min(settings.dt, settings.dt_max);
+    for (int i = 0; times.back() < settings.final_time && i < settings.max_steps; ++i) {
+      const double dt = std::min(next_dt, settings.final_time - times.back());
+      const double next_time = times.back() + dt;
+      if (!std::isfinite(next_time) || dt <= 0 || next_time <= times.back())
+        throw std::runtime_error("Timestep cannot advance the final-time trajectory");
+      times.push_back(next_time);
+      const double grown = dt * settings.dt_factor;
+      next_dt = std::min(grown, settings.dt_max);
+    }
+    if (times.back() < settings.final_time)
+      throw std::runtime_error("Max steps cannot reach the requested final time");
+    std::vector<double> rhos(times.size(), settings.rho), temps(times.size(), settings.temp);
+    trajectory_times_ = std::move(times);
+    trajectory_rhos_ = std::move(rhos);
+    trajectory_temps_ = std::move(temps);
+    integration_settings_.xnuc = std::move(initial);
+    trajectory_index_ = 0;
+    current_time_ = 0;
+    invalidate_trajectory_cache();
+    return true;
+  } catch (const std::exception &e) {
+    error = e.what();
+    return false;
+  }
+}
+
+bool AppState::run_to_time(bool normalize_before, std::string &error) {
+  error.clear();
+  last_dedt_ = 0.0;
+  last_success_ = false;
+  last_status_ = "failed";
+  last_error_.clear();
+
+  if (!validate_final_time_settings(error)) {
     last_error_ = error;
     return false;
   }
+  const double rho = integration_settings_.rho;
+  const double temp = integration_settings_.temp;
+  const double final_time = integration_settings_.final_time;
+  const double dt_max = integration_settings_.dt_max;
+  const double dt_factor = integration_settings_.dt_factor;
+  const int max_steps = integration_settings_.max_steps;
 
   try {
     const double initial_dt = integration_settings_.dt;
