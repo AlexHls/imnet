@@ -1,4 +1,5 @@
 module imyann_nuppn_c_api
+   use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
    use iso_c_binding, only: c_char, c_double, c_int, c_null_char
    use array_sizes, only: i282dim, i325dim, iAtdim, iCfdim, nre, nsp
    use alpha_decays, only: alpha_decays_init
@@ -65,8 +66,9 @@ module imyann_nuppn_c_api
 
 contains
 
-   subroutine reset_history(capacity)
+   subroutine reset_history(capacity, status)
       integer(c_int), intent(in) :: capacity
+      integer, intent(out) :: status
 
       if (allocated(last_history_time)) deallocate(last_history_time)
       if (allocated(last_history_rho)) deallocate(last_history_rho)
@@ -76,17 +78,16 @@ contains
       if (allocated(last_history_substeps)) deallocate(last_history_substeps)
       if (allocated(last_history_xnuc)) deallocate(last_history_xnuc)
 
+      status = 0
       last_history_count = 0_c_int
       last_history_capacity = max(capacity, 0_c_int)
       if (last_history_capacity <= 0_c_int .or. nactive <= 0_c_int) return
 
-      allocate(last_history_time(last_history_capacity))
-      allocate(last_history_rho(last_history_capacity))
-      allocate(last_history_temp(last_history_capacity))
-      allocate(last_history_dt(last_history_capacity))
-      allocate(last_history_dedt(last_history_capacity))
-      allocate(last_history_substeps(last_history_capacity))
-      allocate(last_history_xnuc(nactive, last_history_capacity))
+      allocate(last_history_time(last_history_capacity), &
+         last_history_rho(last_history_capacity), last_history_temp(last_history_capacity), &
+         last_history_dt(last_history_capacity), last_history_dedt(last_history_capacity), &
+         last_history_substeps(last_history_capacity), &
+         last_history_xnuc(nactive, last_history_capacity), stat=status)
    end subroutine reset_history
 
    subroutine append_history(time, rho, temp_k, dt, dedt, substeps, yps)
@@ -227,13 +228,21 @@ contains
       nuppn_integrate = unpack_xnuc(xnuc, count, yps)
       if (nuppn_integrate /= 0_c_int) return
 
-      rho = HALF * (rho0 + rho1)
+      rho = HALF * rho0 + HALF * rho1
       t9_0 = temp0_k / 1.0e9_r8
       t9_1 = temp1_k / 1.0e9_r8
       t9 = HALF * (t9_0 + t9_1)
       call calculate_ye(yps, an, zn, ye, considerisotope)
       call evaluate_all_rates(ye, nvar_saved, nvrel_saved, rho, t9, yps, nu_saved)
       dedt = energy_flux(yps)
+      if (.not. ieee_is_finite(dedt)) then
+         nuppn_integrate = -1001_c_int
+         return
+      end if
+      if (dt == ZERO) then
+         nuppn_integrate = 0_c_int
+         return
+      end if
       call integrate_network(nvar_saved, yps, t9_0, t9_1, rho0, rho1, ye, dt, &
          nvrel_saved, nu_saved, ierr, ZERO)
       if (ierr /= 0) then
@@ -241,6 +250,11 @@ contains
          return
       end if
 
+      if (any(.not. ieee_is_finite(yps(active_species(1:nactive)))) .or. &
+          any(yps(active_species(1:nactive)) < ZERO)) then
+         nuppn_integrate = -1001_c_int
+         return
+      end if
       last_substeps = int(nsubt, c_int)
       do i = 1, nactive
          xnuc(i) = yps(active_species(i))
@@ -266,16 +280,33 @@ contains
       time = ZERO
       step_dt = min(initial_dt, max_dt)
       total_substeps = 0
-      call reset_history(max_steps + 1_c_int)
+      if (max_steps <= 0_c_int .or. max_steps == huge(max_steps)) then
+         nuppn_integrate_to_time = 5_c_int
+         return
+      end if
+      call reset_history(max_steps + 1_c_int, ierr)
+      if (ierr /= 0) then
+         nuppn_integrate_to_time = 6_c_int
+         return
+      end if
       call append_history(time, rho, temp_k, step_dt, ZERO, 0, yps)
       do step = 1, max_steps
          if (time >= final_time) exit
          dt = min(step_dt, final_time - time)
-         if (dt <= ZERO) exit
+         if (dt <= ZERO .or. time + dt <= time) then
+            last_substeps = int(total_substeps, c_int)
+            nuppn_integrate_to_time = 5_c_int
+            return
+         end if
 
          call calculate_ye(yps, an, zn, ye, considerisotope)
          call evaluate_all_rates(ye, nvar_saved, nvrel_saved, rho, t9, yps, nu_saved)
          dedt = energy_flux(yps)
+         if (.not. ieee_is_finite(dedt)) then
+            last_substeps = int(total_substeps, c_int)
+            nuppn_integrate_to_time = -1001_c_int
+            return
+         end if
          call integrate_network(nvar_saved, yps, t9, t9, rho, rho, ye, dt, &
             nvrel_saved, nu_saved, ierr, time)
          if (ierr /= 0) then
@@ -284,6 +315,12 @@ contains
             return
          end if
 
+         if (any(.not. ieee_is_finite(yps(active_species(1:nactive)))) .or. &
+             any(yps(active_species(1:nactive)) < ZERO)) then
+            last_substeps = int(total_substeps, c_int)
+            nuppn_integrate_to_time = -1001_c_int
+            return
+         end if
          total_substeps = total_substeps + nsubt
          time = time + dt
          call append_history(time, rho, temp_k, dt, dedt, nsubt, yps)

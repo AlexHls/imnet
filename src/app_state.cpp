@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 #include <unordered_map>
 
 namespace imyann {
@@ -64,6 +65,54 @@ void validate_step_composition(const std::vector<double> &xnuc,
   }
 }
 
+bool normalize_composition(std::vector<double> &xnuc, const std::vector<bool> &fixed) {
+  if (xnuc.size() != fixed.size()) {
+    std::cerr << "Warning: Abundance and fixed-mask sizes do not match"
+              << std::endl;
+    return false;
+  }
+
+  double fixed_sum = 0.0;
+  double unfixed_sum = 0.0;
+  for (size_t i = 0; i < xnuc.size(); ++i) {
+    if (!std::isfinite(xnuc[i]) || xnuc[i] < 0.0) {
+      std::cerr << "Warning: Cannot normalize invalid abundances" << std::endl;
+      return false;
+    }
+    if (fixed[i]) {
+      fixed_sum += xnuc[i];
+    } else {
+      unfixed_sum += xnuc[i];
+    }
+  }
+
+  if (!std::isfinite(fixed_sum) || !std::isfinite(unfixed_sum)) {
+    std::cerr << "Warning: Abundance sum overflowed" << std::endl;
+    return false;
+  }
+  constexpr double tolerance = 1e-12;
+  if (fixed_sum > 1.0 + tolerance) {
+    std::cerr << "Warning: Fixed abundances sum to " << fixed_sum
+              << ", cannot normalize" << std::endl;
+    return false;
+  }
+
+  if (unfixed_sum == 0.0 && fixed_sum < 1.0 - tolerance) {
+    std::cerr << "Warning: No unfixed abundance is available to normalize"
+              << std::endl;
+    return false;
+  }
+
+  const double scale =
+      unfixed_sum > 0.0 ? std::max(0.0, 1.0 - fixed_sum) / unfixed_sum : 0.0;
+  for (size_t i = 0; i < xnuc.size(); ++i) {
+    if (!fixed[i]) {
+      xnuc[i] *= scale;
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 bool AppState::initialize_network(const std::string &species_file,
@@ -71,6 +120,12 @@ bool AppState::initialize_network(const std::string &species_file,
                                   const std::string &partition_file,
                                   const std::string &mass_file,
                                   const std::string &weak_file) {
+#ifdef IMNET_USE_NUPPN
+  if (network_) {
+    std::cerr << "NuPPN cannot reload physics in this process; restart imnet to load inputs" << std::endl;
+    return false;
+  }
+#endif
   try {
     const auto old_names = species_names_;
     const auto old_settings = integration_settings_;
@@ -143,6 +198,7 @@ bool AppState::initialize_network(const std::string &species_file,
     species_names_ = std::move(new_species_names);
     integration_settings_ = std::move(new_settings);
     initial_xnuc_ = std::move(new_initial_xnuc);
+    current_time_ = 0.0;
     species_file_ = species_file;
     reaclib_file_ = reaclib_file;
     partition_file_ = partition_file;
@@ -173,54 +229,15 @@ bool AppState::reload_rate_files(const std::string &reaclib_file,
 }
 
 void AppState::reset_abundances() {
+  current_time_ = 0.0;
   integration_settings_.xnuc = initial_xnuc_;
   integration_settings_.fixed.assign(integration_settings_.xnuc.size(), false);
   invalidate_trajectory_cache();
 }
 
 bool AppState::normalize_abundances() {
-  auto &xnuc = integration_settings_.xnuc;
-  auto &fixed = integration_settings_.fixed;
-  if (xnuc.size() != fixed.size()) {
-    std::cerr << "Warning: Abundance and fixed-mask sizes do not match"
-              << std::endl;
+  if (!normalize_composition(integration_settings_.xnuc, integration_settings_.fixed))
     return false;
-  }
-
-  double fixed_sum = 0.0;
-  double unfixed_sum = 0.0;
-  for (size_t i = 0; i < xnuc.size(); ++i) {
-    if (!std::isfinite(xnuc[i]) || xnuc[i] < 0.0) {
-      std::cerr << "Warning: Cannot normalize invalid abundances" << std::endl;
-      return false;
-    }
-    if (fixed[i]) {
-      fixed_sum += xnuc[i];
-    } else {
-      unfixed_sum += xnuc[i];
-    }
-  }
-
-  constexpr double tolerance = 1e-12;
-  if (fixed_sum > 1.0 + tolerance) {
-    std::cerr << "Warning: Fixed abundances sum to " << fixed_sum
-              << ", cannot normalize" << std::endl;
-    return false;
-  }
-
-  if (unfixed_sum == 0.0 && fixed_sum < 1.0 - tolerance) {
-    std::cerr << "Warning: No unfixed abundance is available to normalize"
-              << std::endl;
-    return false;
-  }
-
-  const double scale =
-      unfixed_sum > 0.0 ? std::max(0.0, 1.0 - fixed_sum) / unfixed_sum : 0.0;
-  for (size_t i = 0; i < xnuc.size(); ++i) {
-    if (!fixed[i]) {
-      xnuc[i] *= scale;
-    }
-  }
   invalidate_trajectory_cache();
   return true;
 }
@@ -292,10 +309,19 @@ bool AppState::integrate_single_step(bool normalize_before, double &dedt,
       last_error_ = error;
       return false;
     }
+    const double next_time = current_time_ + integration_settings_.dt;
+    if (!std::isfinite(next_time) ||
+        (integration_settings_.dt > 0.0 && next_time <= current_time_)) {
+      throw std::runtime_error("Timestep cannot advance the current time");
+    }
+    auto next_xnuc = integration_settings_.xnuc;
     dedt = network_->integrate(integration_settings_.rho,
-                               integration_settings_.temp,
-                               integration_settings_.xnuc,
+                               integration_settings_.temp, next_xnuc,
                                integration_settings_.dt);
+    validate_step_composition(next_xnuc, species_names_);
+    if (!std::isfinite(dedt)) throw std::runtime_error("Non-finite energy generation");
+    integration_settings_.xnuc = std::move(next_xnuc);
+    current_time_ = next_time;
     last_dedt_ = dedt;
     last_success_ = true;
     last_status_ = "ok";
@@ -312,25 +338,19 @@ bool AppState::integrate_single_step(bool normalize_before, double &dedt,
   }
 }
 
-bool AppState::run_to_time(bool normalize_before, std::string &error) {
+bool AppState::validate_final_time_settings(std::string &error) const {
   error.clear();
-  last_dedt_ = 0.0;
-  last_success_ = false;
-  last_status_ = "failed";
-  last_error_.clear();
-
-  if (normalize_before && !normalize_abundances()) {
-    error = "Could not normalize abundances";
-    last_error_ = error;
+  try {
+    validate_history_budget(species_names_.size(), integration_settings_.max_steps);
+  } catch (const std::exception &e) {
+    error = e.what();
     return false;
   }
+
   if (!validate_integration_settings(error)) {
-    last_error_ = error;
     return false;
   }
 
-  const double rho = integration_settings_.rho;
-  const double temp = integration_settings_.temp;
   const double final_time = integration_settings_.final_time;
   const double dt_max = integration_settings_.dt_max;
   const double dt_factor = integration_settings_.dt_factor;
@@ -343,116 +363,200 @@ bool AppState::run_to_time(bool normalize_before, std::string &error) {
     error = "Maximum timestep must be finite and positive";
   } else if (!std::isfinite(dt_factor) || dt_factor <= 0.0) {
     error = "Timestep factor must be finite and positive";
-  } else if (max_steps <= 0) {
-    error = "Max steps must be positive";
+  } else if (max_steps <= 0 || max_steps == std::numeric_limits<int>::max()) {
+    error = "Max steps must be positive and leave room for the initial row";
   }
   if (!error.empty()) {
-    last_error_ = error;
     return false;
   }
 
-  const double initial_dt = integration_settings_.dt;
-  const std::vector<double> initial_xnuc = integration_settings_.xnuc;
-  trajectory_times_.clear();
-  trajectory_rhos_.clear();
-  trajectory_temps_.clear();
-  trajectory_dedt_.clear();
-  trajectory_cache_.clear();
-  invalidate_reaction_flux_state();
-  trajectory_dedt_.reserve(static_cast<size_t>(max_steps) + 1);
-  trajectory_cache_.reserve(static_cast<size_t>(max_steps) + 1);
+  return true;
+}
 
-  auto append_step = [&](size_t index, double time, double row_rho,
-                         double row_temp, double row_dt, double dedt,
-                         int substeps, bool success, const std::string &status,
-                         const std::string &step_error,
-                         const std::vector<double> &xnuc) {
-    trajectory_times_.push_back(time);
-    trajectory_rhos_.push_back(row_rho);
-    trajectory_temps_.push_back(row_temp);
-    trajectory_dedt_.push_back(dedt);
-
-    TrajectoryStepCache step;
-    step.index = index;
-    step.time = time;
-    step.rho = row_rho;
-    step.temp = row_temp;
-    step.dt = row_dt;
-    step.dedt = dedt;
-    step.substeps = substeps;
-    step.success = success;
-    step.status = status;
-    step.error = step_error;
-    step.xnuc = xnuc;
-    trajectory_cache_.push_back(std::move(step));
-  };
-
-  auto append_history = [&]() {
-    for (const auto &snapshot : network_->last_step_history()) {
-      append_step(snapshot.index, snapshot.time, snapshot.rho, snapshot.temp,
-                  snapshot.dt, snapshot.dedt, snapshot.substeps, true,
-                  snapshot.index == 0 ? "initial" : "ok", "", snapshot.xnuc);
-    }
-  };
-
+bool AppState::prepare_final_time_trajectory(bool normalize_before, std::string &error) {
+  if (!validate_final_time_settings(error)) return false;
   try {
-    double dedt = network_->integrate_to_time(
-        rho, temp, integration_settings_.xnuc, final_time, initial_dt, dt_max,
-        dt_factor, max_steps);
-    validate_step_composition(integration_settings_.xnuc, species_names_);
-    trajectory_times_.clear();
-    trajectory_rhos_.clear();
-    trajectory_temps_.clear();
-    trajectory_dedt_.clear();
-    trajectory_cache_.clear();
-    append_history();
-    last_dedt_ = dedt;
-    last_success_ = true;
-    last_status_ = "ok";
-    if (trajectory_cache_.empty()) {
-      append_step(0, 0.0, rho, temp, initial_dt, 0.0, 0, true, "initial", "",
-                  initial_xnuc);
-      append_step(1, final_time, rho, temp, initial_dt, dedt,
-                  network_->last_substeps(), true, "ok", "",
-                  integration_settings_.xnuc);
+    const auto &settings = integration_settings_;
+    auto initial = settings.xnuc;
+    if (normalize_before && !normalize_composition(initial, settings.fixed)) {
+      error = "Could not normalize abundances";
+      return false;
     }
+    std::vector<double> times{0.0};
+    double next_dt = std::min(settings.dt, settings.dt_max);
+    for (int i = 0; times.back() < settings.final_time && i < settings.max_steps; ++i) {
+      const double dt = std::min(next_dt, settings.final_time - times.back());
+      const double next_time = times.back() + dt;
+      if (!std::isfinite(next_time) || dt <= 0 || next_time <= times.back())
+        throw std::runtime_error("Timestep cannot advance the final-time trajectory");
+      times.push_back(next_time);
+      const double grown = dt * settings.dt_factor;
+      next_dt = std::min(grown, settings.dt_max);
+    }
+    if (times.back() < settings.final_time)
+      throw std::runtime_error("Max steps cannot reach the requested final time");
+    std::vector<double> rhos(times.size(), settings.rho), temps(times.size(), settings.temp);
+    trajectory_times_ = std::move(times);
+    trajectory_rhos_ = std::move(rhos);
+    trajectory_temps_ = std::move(temps);
+    integration_settings_.xnuc = std::move(initial);
+    trajectory_index_ = 0;
+    current_time_ = 0;
+    invalidate_trajectory_cache();
+    return true;
   } catch (const std::exception &e) {
     error = e.what();
-    if (network_ && !network_->last_step_history().empty()) {
+    return false;
+  }
+}
+
+bool AppState::run_to_time(bool normalize_before, std::string &error) {
+  error.clear();
+  last_dedt_ = 0.0;
+  last_success_ = false;
+  last_status_ = "failed";
+  last_error_.clear();
+
+  if (!validate_final_time_settings(error)) {
+    last_error_ = error;
+    return false;
+  }
+  const double rho = integration_settings_.rho;
+  const double temp = integration_settings_.temp;
+  const double final_time = integration_settings_.final_time;
+  const double dt_max = integration_settings_.dt_max;
+  const double dt_factor = integration_settings_.dt_factor;
+  const int max_steps = integration_settings_.max_steps;
+
+  try {
+    const double initial_dt = integration_settings_.dt;
+    auto initial_xnuc = integration_settings_.xnuc;
+    if (normalize_before && !normalize_composition(initial_xnuc, integration_settings_.fixed)) {
+      error = "Could not normalize abundances";
+      last_error_ = error;
+      return false;
+    }
+    auto next_xnuc = initial_xnuc;
+    // Build replacement history locally; allocation failures leave the old plot intact.
+    std::vector<double> trajectory_times_, trajectory_rhos_, trajectory_temps_, trajectory_dedt_;
+    std::vector<TrajectoryStepCache> trajectory_cache_;
+    const auto capacity = static_cast<size_t>(max_steps) + 1;
+    trajectory_times_.reserve(capacity);
+    trajectory_rhos_.reserve(capacity);
+    trajectory_temps_.reserve(capacity);
+    trajectory_dedt_.reserve(capacity);
+    trajectory_cache_.reserve(capacity);
+    auto commit_history = [&] {
+      this->trajectory_times_ = std::move(trajectory_times_);
+      this->trajectory_rhos_ = std::move(trajectory_rhos_);
+      this->trajectory_temps_ = std::move(trajectory_temps_);
+      this->trajectory_dedt_ = std::move(trajectory_dedt_);
+      this->trajectory_cache_ = std::move(trajectory_cache_);
+      invalidate_reaction_flux_state();
+    };
+
+    auto append_step = [&](size_t index, double time, double row_rho,
+                           double row_temp, double row_dt, double dedt,
+                           int substeps, bool success, const std::string &status,
+                           const std::string &step_error,
+                           const std::vector<double> &xnuc) {
+      trajectory_times_.push_back(time);
+      trajectory_rhos_.push_back(row_rho);
+      trajectory_temps_.push_back(row_temp);
+      trajectory_dedt_.push_back(dedt);
+
+      TrajectoryStepCache step;
+      step.index = index;
+      step.time = time;
+      step.rho = row_rho;
+      step.temp = row_temp;
+      step.dt = row_dt;
+      step.dedt = dedt;
+      step.substeps = substeps;
+      step.success = success;
+      step.status = status;
+      step.error = step_error;
+      step.xnuc = xnuc;
+      trajectory_cache_.push_back(std::move(step));
+    };
+
+    auto append_history = [&]() {
+      for (const auto &snapshot : network_->last_step_history()) {
+        append_step(snapshot.index, snapshot.time, snapshot.rho, snapshot.temp,
+                    snapshot.dt, snapshot.dedt, snapshot.substeps, true,
+                    snapshot.index == 0 ? "initial" : "ok", "", snapshot.xnuc);
+      }
+    };
+
+    try {
+      double dedt = network_->integrate_to_time(
+          rho, temp, next_xnuc, final_time, initial_dt, dt_max,
+          dt_factor, max_steps);
+      validate_step_composition(next_xnuc, species_names_);
       trajectory_times_.clear();
       trajectory_rhos_.clear();
       trajectory_temps_.clear();
       trajectory_dedt_.clear();
       trajectory_cache_.clear();
       append_history();
-      trajectory_cache_.back().success = false;
-      trajectory_cache_.back().status = "failed";
-      trajectory_cache_.back().error = error;
-    } else {
-      integration_settings_.xnuc = initial_xnuc;
-      append_step(0, 0.0, rho, temp, initial_dt, 0.0, 0, true, "initial", "",
-                  initial_xnuc);
-      append_step(1, final_time, rho, temp, initial_dt, last_dedt_,
-                  network_->last_substeps(), false, "failed", error,
-                  integration_settings_.xnuc);
+      last_dedt_ = dedt;
+      last_success_ = true;
+      last_status_ = "ok";
+      if (trajectory_cache_.empty()) {
+        append_step(0, 0.0, rho, temp, initial_dt, 0.0, 0, true, "initial", "",
+                    initial_xnuc);
+        append_step(1, final_time, rho, temp, initial_dt, dedt,
+                    network_->last_substeps(), true, "ok", "",
+                    next_xnuc);
+      }
+    } catch (const std::bad_alloc &) {
+      throw;
+    } catch (const std::exception &e) {
+      error = e.what();
+      if (network_ && !network_->last_step_history().empty()) {
+        trajectory_times_.clear();
+        trajectory_rhos_.clear();
+        trajectory_temps_.clear();
+        trajectory_dedt_.clear();
+        trajectory_cache_.clear();
+        append_history();
+        trajectory_cache_.back().success = false;
+        trajectory_cache_.back().status = "failed";
+        trajectory_cache_.back().error = error;
+      } else {
+        next_xnuc = initial_xnuc;
+        append_step(0, 0.0, rho, temp, initial_dt, 0.0, 0, true, "initial", "",
+                    initial_xnuc);
+        append_step(1, final_time, rho, temp, initial_dt, last_dedt_,
+                    network_->last_substeps(), false, "failed", error,
+                    next_xnuc);
+      }
+      trajectory_index_ =
+          trajectory_cache_.empty() ? 0 : trajectory_cache_.back().index;
+      commit_history();
+      set_trajectory_step(trajectory_index_);
+      integration_settings_.dt = initial_dt;
+      last_error_ = error;
+      return false;
     }
+
     trajectory_index_ =
         trajectory_cache_.empty() ? 0 : trajectory_cache_.back().index;
+    commit_history();
     set_trajectory_step(trajectory_index_);
     integration_settings_.dt = initial_dt;
+    last_error_.clear();
+    std::cout << "Final-time integration complete: "
+              << this->trajectory_cache_.size() << " steps cached" << std::endl;
+    error.clear();
+    return true;
+  } catch (const std::bad_alloc &) {
+    error = "Not enough memory for integration history; previous trajectory retained";
     last_error_ = error;
+    last_success_ = false;
+    last_status_ = "failed";
     return false;
   }
-
-  trajectory_index_ =
-      trajectory_cache_.empty() ? 0 : trajectory_cache_.back().index;
-  set_trajectory_step(trajectory_index_);
-  integration_settings_.dt = initial_dt;
-  last_error_.clear();
-  std::cout << "Final-time integration complete: "
-            << trajectory_cache_.size() << " steps cached" << std::endl;
-  error.clear();
-  return true;
 }
 
 void AppState::compute_nse() {
@@ -497,6 +601,7 @@ bool AppState::load_abundances_from_file(const std::string &filename) {
   }
   integration_settings_.xnuc = xnuc;
   initial_xnuc_ = std::move(xnuc);
+  current_time_ = 0.0;
   invalidate_trajectory_cache();
   return true;
 }
@@ -519,6 +624,7 @@ bool AppState::load_trajectory_file(const std::string &filename) {
   trajectory_temps_ = std::move(temps);
   invalidate_trajectory_cache();
   trajectory_index_ = 0;
+  current_time_ = trajectory_times_.front();
 
   if (!trajectory_rhos_.empty()) {
     integration_settings_.rho = trajectory_rhos_[0];
@@ -542,6 +648,14 @@ bool AppState::save_trajectory_file(const std::string &filename) const {
 }
 
 bool AppState::save_state_to_file(const std::string &filename) const {
+  if (!write_file_atomic(filename, [&](std::ostream &out) {
+        if (!write_state(out)) throw std::runtime_error("Cannot serialize state");
+      })) return false;
+  std::cout << "Saved state to " << filename << std::endl;
+  return true;
+}
+
+bool AppState::write_state(std::ostream &destination) const {
   std::string error;
   if (!network_ || !validate_composition(error) ||
       species_data_.size() != species_names_.size()) {
@@ -551,7 +665,13 @@ bool AppState::save_state_to_file(const std::string &filename) const {
     return false;
   }
 
+  if (!std::isfinite(view_settings_.flux_threshold) || view_settings_.flux_threshold < 0) {
+    std::cerr << "Error: Cannot save state with invalid flux threshold" << std::endl;
+    return false;
+  }
+
   std::vector<TrajectoryStepCache> steps = trajectory_cache_;
+  // Export computed results unchanged; current inputs only fill an uncached row.
   const bool current_is_cached =
       std::any_of(steps.begin(), steps.end(), [this](const auto &step) {
         return step.index == trajectory_index_;
@@ -559,10 +679,7 @@ bool AppState::save_state_to_file(const std::string &filename) const {
   if (steps.empty() || !current_is_cached) {
     TrajectoryStepCache current;
     current.index = trajectory_index_;
-    current.time =
-        trajectory_index_ < trajectory_times_.size()
-            ? trajectory_times_[trajectory_index_]
-            : 0.0;
+    current.time = current_time_;
     current.rho = integration_settings_.rho;
     current.temp = integration_settings_.temp;
     current.dt = integration_settings_.dt;
@@ -577,12 +694,7 @@ bool AppState::save_state_to_file(const std::string &filename) const {
   std::sort(steps.begin(), steps.end(),
             [](const auto &a, const auto &b) { return a.index < b.index; });
 
-  std::ofstream out(filename);
-  if (!out) {
-    std::cerr << "Error: Could not open state output file: " << filename
-              << std::endl;
-    return false;
-  }
+  std::ostringstream out;
   out << std::setprecision(17) << std::scientific;
   out << "{\n  \"format\": \"imnet-state-v1\",\n"
       << "  \"units\": {\"time\": \"s\", \"rho\": \"g/cm^3\", "
@@ -657,9 +769,11 @@ bool AppState::save_state_to_file(const std::string &filename) const {
   try {
     for (size_t i = 0; i < steps.size(); ++i) {
       const auto &step = steps[i];
-      if (step.xnuc.size() != species_data_.size()) {
-        throw std::runtime_error("saved abundance vector size mismatch");
+      validate_step_composition(step.xnuc, species_names_);
+      for (double value : {step.time, step.rho, step.temp, step.dt, step.dedt}) {
+        if (!std::isfinite(value)) throw std::runtime_error("Non-finite state metadata");
       }
+      if (step.rho <= 0 || step.temp <= 0) throw std::runtime_error("Invalid state conditions");
       const auto fluxes = network_->get_reaction_fluxes(
           step.rho, step.temp, step.xnuc, 0.0, 0,
           std::numeric_limits<size_t>::max());
@@ -697,14 +811,8 @@ bool AppState::save_state_to_file(const std::string &filename) const {
     return false;
   }
   out << "\n  ]\n}\n";
-  out.close();
-  if (!out) {
-    std::cerr << "Error: Failed while writing state file: " << filename
-              << std::endl;
-    return false;
-  }
-  std::cout << "Saved state to " << filename << std::endl;
-  return true;
+  destination << out.str();
+  return static_cast<bool>(destination);
 }
 
 bool AppState::run_trajectory() {
@@ -781,7 +889,7 @@ bool AppState::run_trajectory(std::string &error) {
       }
       validate_step_composition(next_xnuc, species_names_);
       xnuc = std::move(next_xnuc);
-      make_step(i + 1, dedt, network_->last_substeps(), true, "ok", "");
+      make_step(i + 1, dedt, dt > 0.0 ? network_->last_substeps() : 0, true, "ok", "");
     } catch (const std::exception &e) {
       error = "Step " + std::to_string(i + 1) + " failed: " + e.what();
       make_step(i + 1, dedt, network_->last_substeps(), false, "failed",
@@ -812,6 +920,11 @@ bool AppState::set_trajectory_step(size_t step) {
     integration_settings_.temp = cached->temp;
     integration_settings_.dt = cached->dt;
     integration_settings_.xnuc = cached->xnuc;
+    current_time_ = cached->time;
+    last_dedt_ = cached->dedt;
+    last_success_ = cached->success;
+    last_status_ = cached->status;
+    last_error_ = cached->error;
     if (cached->success) {
       record_reaction_flux_state(cached->rho, cached->temp, cached->xnuc);
     } else {
@@ -958,6 +1071,12 @@ bool AppState::validate_composition(std::string &error) const {
       return false;
     }
   }
+  double sum = 0.0;
+  for (double x : integration_settings_.xnuc) sum += x;
+  if (!std::isfinite(sum) || sum <= 0.0) {
+    error = "Total abundance must be finite and positive";
+    return false;
+  }
   error.clear();
   return true;
 }
@@ -1018,13 +1137,9 @@ double AppState::get_species_rate(int species_index) const {
     return 0.0;
   }
 
-  try {
-    return network_->get_reaction_rate(species_index, integration_settings_.rho,
+  return network_->get_reaction_rate(species_index, integration_settings_.rho,
                                        integration_settings_.temp,
                                        integration_settings_.xnuc);
-  } catch (...) {
-    return 0.0;
-  }
 }
 
 std::vector<ReactionDiagnostic>
@@ -1038,13 +1153,9 @@ AppState::get_species_reaction_diagnostics(int species_index,
     return {};
   }
 
-  try {
-    return network_->get_reaction_diagnostics(
+  return network_->get_reaction_diagnostics(
         species_index, integration_settings_.rho, integration_settings_.temp,
         integration_settings_.xnuc, max_count);
-  } catch (...) {
-    return {};
-  }
 }
 
 std::vector<ReactionFlux>
@@ -1058,14 +1169,9 @@ AppState::get_reaction_fluxes(double min_strength, int metric,
     return {};
   }
 
-  try {
-    return network_->get_reaction_fluxes(
-        flux_state_rho_, flux_state_temp_, flux_state_xnuc_, min_strength,
-        metric, max_count,
-        include_regular, include_weak);
-  } catch (...) {
-    return {};
-  }
+  return network_->get_reaction_fluxes(
+      flux_state_rho_, flux_state_temp_, flux_state_xnuc_, min_strength,
+      metric, max_count, include_regular, include_weak);
 }
 
 void AppState::record_reaction_flux_state(double rho, double temp,

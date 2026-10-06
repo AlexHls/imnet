@@ -67,7 +67,7 @@ else()
         VERBATIM
     )
 
-    add_library(libnetwork STATIC nuppn_c_api.F90)
+    add_library(libnetwork STATIC nuppn_c_api.F90 nuppn_preflight.cpp)
     add_dependencies(libnetwork nuppn_external)
     target_include_directories(libnetwork PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -127,6 +127,7 @@ else()
     target_compile_options(imnet PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+set(IMNET_TEST_DATA_DIR "${DATA_DIR}" CACHE PATH "Rate/species directory for Yann app tests")
 if(BUILD_TESTING AND IMNET_NETWORK_BACKEND STREQUAL "YANN")
     add_executable(imnet_app_tests
         ${CMAKE_SOURCE_DIR}/tests/app_layer_tests.cpp
@@ -139,7 +140,7 @@ if(BUILD_TESTING AND IMNET_NETWORK_BACKEND STREQUAL "YANN")
     )
     target_link_libraries(imnet_app_tests PRIVATE libnetwork)
     target_compile_definitions(imnet_app_tests PRIVATE
-        IMNET_TEST_DATA_DIR="${DATA_DIR}"
+        IMNET_TEST_DATA_DIR="${IMNET_TEST_DATA_DIR}"
     )
     add_test(NAME imnet_app_tests COMMAND imnet_app_tests)
 endif()
@@ -152,3 +153,74 @@ install(TARGETS imnet
 install(DIRECTORY ${DATA_DIR}/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/imnet/data
 )
+
+# Optional scientific regression: external rate tables and Python plotting
+# packages are supplied by the caller, never downloaded during configuration.
+set(IMNET_REFERENCE_DATA_DIR "" CACHE PATH
+    "Enable reference burn test: Yann rate directory or NuPPN run template")
+if(BUILD_TESTING AND IMNET_REFERENCE_DATA_DIR)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import numpy, matplotlib"
+        RESULT_VARIABLE IMNET_REFERENCE_PYTHON_STATUS)
+    if(NOT IMNET_REFERENCE_PYTHON_STATUS EQUAL 0)
+        message(FATAL_ERROR "Reference burn test needs NumPy and Matplotlib; set Python3_EXECUTABLE")
+    endif()
+    add_executable(imnet_reference_state
+        ${CMAKE_SOURCE_DIR}/tests/reference_burn_state.cpp
+        file_io.cpp app_state.cpp network_wrapper.cpp)
+    target_include_directories(imnet_reference_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(imnet_reference_state PRIVATE libnetwork)
+    if(IMNET_NETWORK_BACKEND STREQUAL "NUPPN")
+        target_compile_definitions(imnet_reference_state PRIVATE IMNET_USE_NUPPN
+            IMNET_NUPPN_RUN_DIR="${IMNET_NUPPN_RUN_DIR}")
+    endif()
+    add_test(NAME imnet_reference_burn
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/reference_burn.py"
+            --imnet $<TARGET_FILE:imnet>
+            --gui-driver $<TARGET_FILE:imnet_reference_state>
+            --backend "${IMNET_NETWORK_BACKEND}"
+            --data-dir "${IMNET_REFERENCE_DATA_DIR}"
+            --output-dir "${CMAKE_BINARY_DIR}/reference-burn")
+    set_tests_properties(imnet_reference_burn PROPERTIES TIMEOUT 600 LABELS "integration;reference")
+endif()
+
+if(BUILD_TESTING)
+    add_executable(imnet_plot_tests ${CMAKE_SOURCE_DIR}/tests/plot_tests.cpp)
+    target_include_directories(imnet_plot_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(imnet_plot_tests PRIVATE implot)
+    add_test(NAME imnet_plot_tests COMMAND imnet_plot_tests)
+endif()
+
+# Manual desktop regression: deliberately not registered with headless CTest.
+if(BUILD_TESTING)
+    set(IMNET_GUI_TEST_SOURCES ${IMNET_SOURCES})
+    list(REMOVE_ITEM IMNET_GUI_TEST_SOURCES main.cpp)
+    add_executable(imnet_gui_tests ${CMAKE_SOURCE_DIR}/tests/gui_tests.cpp ${IMNET_GUI_TEST_SOURCES})
+    target_include_directories(imnet_gui_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(imnet_gui_tests PRIVATE $<TARGET_PROPERTY:imnet,COMPILE_DEFINITIONS>)
+    target_link_libraries(imnet_gui_tests PRIVATE libnetwork implot)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(imnet_file_io_tests ${CMAKE_SOURCE_DIR}/tests/file_io_tests.cpp file_io.cpp)
+    target_include_directories(imnet_file_io_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME imnet_file_io_tests COMMAND imnet_file_io_tests)
+endif()
+
+if(IMNET_NETWORK_BACKEND STREQUAL "NUPPN")
+    add_executable(imnet_nuppn_probe nuppn_probe.cpp)
+    target_link_libraries(imnet_nuppn_probe PRIVATE libnetwork)
+    foreach(consumer imnet imnet_reference_state imnet_gui_tests)
+        if(TARGET ${consumer})
+            add_dependencies(${consumer} imnet_nuppn_probe)
+        endif()
+    endforeach()
+    install(TARGETS imnet_nuppn_probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+if(BUILD_TESTING AND UNIX)
+    add_executable(imnet_preflight_tests ${CMAKE_SOURCE_DIR}/tests/nuppn_preflight_tests.cpp nuppn_preflight.cpp)
+    target_include_directories(imnet_preflight_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME imnet_preflight_tests COMMAND imnet_preflight_tests)
+    set_tests_properties(imnet_preflight_tests PROPERTIES TIMEOUT 15)
+endif()

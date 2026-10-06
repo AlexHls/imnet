@@ -120,8 +120,88 @@ cmake --build build-yann
 ctest --test-dir build-yann --output-on-failure
 ```
 
-The NuPPN configuration currently has no registered CTest tests; use a build
-smoke test plus representative headless runs.
+### Nine-species reference burn (both backends)
+
+`tests/reference_burn.py` compares all 2,362 samples in
+`tests/data/X_reference.npz` at their exact times (no interpolation), mapping
+columns by the names in `species9.txt`. The initial mass fractions are
+p=0.5, he4=0.25, c12=0.25; T=2e8 K and rho=1e4 g/cm³ remain constant.
+
+Enable the test by supplying external runtime data and a Python interpreter
+with NumPy and Matplotlib installed:
+
+```sh
+cmake -S . -B build-nuppn \
+  -DIMNET_NETWORK_BACKEND=NUPPN \
+  -DIMNET_NUPPN_SOURCE_DIR=/path/to/nuppn \
+  -DIMNET_REFERENCE_DATA_DIR=/path/to/nuppn/frames/ppn/run_template \
+  -DPython3_EXECUTABLE=/path/to/python
+cmake --build build-nuppn
+ctest --test-dir build-nuppn -R imnet_reference_burn --output-on-failure
+```
+
+For Yann, configure `build-yann` with `IMNET_NETWORK_BACKEND=YANN`,
+`IMNET_YANN_SOURCE_DIR`, and `IMNET_REFERENCE_DATA_DIR` pointing to a directory
+containing `jinareaclib.dat`, `part.txt`, `mass.txt`, and `lmp_weak_rates.txt`.
+The test supplies its own nine-species `species.txt`.
+
+Each run keeps an isolated input directory under `build-*/reference-burn/run-*`.
+NuPPN input files are copied, both species masks are restricted to the reference
+network, and VITAL reaction overrides are disabled to use the backend's
+REACLIB network. The supplied template's rate-library selection, screening,
+solver settings, and other physics options remain in effect. Its sibling
+`NPDATA` is symlinked for access to the external rate tables.
+External input files and backend sources are not edited by the test.
+
+The test runs the headless executable and a separate `AppState` helper that
+checks cached-step selection, all three flux metrics, sorting, thresholds,
+and regular/weak arrow filters. It also checks species metadata, finite
+nonnegative abundances, mass conservation, CSV/JSON agreement, and expected
+CNO arrow directions. **This covers GUI state APIs, not the window's incremental
+trajectory scheduler or on-screen arrow geometry.**
+
+YANN uses the pointwise check `abs(X - reference) <= 1e-5 + 0.05*reference`.
+NuPPN's rate-set differences are expected: its default acceptance check compares
+bulk nucleosynthesis using `0.5 * sum(abs(X - reference))`, the mass fraction that
+would need redistribution to match the reference. This must stay below 0.10 at
+all times and below 0.02 at the final time. These are broad regression limits,
+not solver-accuracy targets. Both paths still require finite nonnegative
+abundances, mass conservation, correct flux directions and matching GUI/headless
+results. Pointwise errors are always reported and plotted; `--strict-reference`
+restores the pointwise pass/fail criterion for NuPPN too. Reference roundoff
+negatives (down to approximately -1.5e-17) are clipped after validation.
+
+Outputs in `build-*/reference-burn/`:
+
+- `abundances.png`: nine log-log panels, reference and both application paths.
+- `errors.png`: worst normalized error across species versus the pass limit.
+- `fluxes.png`: exported heavy-nucleus CNO arrows at roughly 1, 100, and 1,000 s;
+  proton/alpha legs are omitted for readability. This is a diagnostic plot,
+  not a screenshot of imnet.
+- `varying-trajectory.png`: a 100 s linear ramp from 1e8 to 3e8 K and 5e3 to
+  2e4 g/cm³ at 16, 64 and 256 intervals. Each backend is checked against its own
+  refined numerical reference; this is a convergence check, not an independent
+  physical reference. The 64-interval GUI-state and headless results must agree.
+- `summary.json`: tolerances, worst discrepancies, convergence errors, and the retained run directory.
+- `run-*`: input files, headless CSV, state JSON files, and process logs.
+
+To run an existing executable directly (without the optional state helper):
+
+```sh
+python tests/reference_burn.py --backend NUPPN \
+  --imnet build-nuppn/src/imnet \
+  --data-dir /path/to/nuppn/frames/ppn/run_template \
+  --output-dir build-nuppn/reference-burn
+```
+
+For manual GUI inspection, launch imnet with `--data-dir` set to the retained
+run's `network` directory. Use File → Load Abundances to load `initial.txt`,
+and File → Load Trajectory to load `trajectory.txt` from that run directory.
+Select Loaded trajectory and Run. Enable flux arrows, browse cached steps,
+and compare the abundance and flux views with the generated plots. The full
+trajectory has 2,362 rows; increase the GUI cache limit when inspecting many
+rows. You can also supply `--abundances` and `--trajectory` at GUI startup;
+these load the files and select trajectory mode without starting a burn.
 
 ## Run the GUI
 
@@ -133,6 +213,17 @@ build-yann/src/imnet --data-dir data
 
 For the NuPPN backend, `--data-dir` is the NuPPN ppn run directory. If omitted,
 the compiled-in default is the supplied checkout's `frames/ppn/run_template`.
+
+The optional desktop regression executable exercises the real GUI scheduler and
+rendering code in a hidden OpenGL window. Run it in a graphical desktop session:
+
+```sh
+build-yann/src/imnet_gui_tests /path/to/run/network /path/to/run/initial.txt /path/to/run/trajectory.txt
+```
+
+Use `build-nuppn/src/imnet_gui_tests` with NuPPN's retained reference-run inputs
+for that backend. It is built with `BUILD_TESTING`, but is not registered with
+headless CTest because it requires a display.
 
 The GUI starts with these main windows:
 
@@ -154,12 +245,23 @@ Common workflow:
 5. Press `Run`.
 6. Inspect cached steps in `Workflow -> Cached Steps`.
 
+GUI final-time runs update progress and plots between batches of timesteps.
+`Cancel Run` retains completed results for inspection and export. These runs
+retain their full history regardless of the trajectory cache-window setting,
+and preserve the initial timestep input. Invalid timestep plans, including a
+step limit too small to reach the final time, are rejected before replacing
+existing results. Individual backend calls are still synchronous and may pause
+the window until they return.
+
 Useful views:
 
 - `View -> Trajectory Plot` shows `rho(t)` and `T(t)`.
 - `View -> Abundance Plot` plots selected isotope mass fractions over cached
   time. Isotopes can be added by search or from the selected nuclide. Log axes
-  use a positive floor so zeros do not break plotting.
+  use separate editable `Log x floor (s)` and `Log y floor (X)` bounds.
+  Floors apply when you finish editing; fitting and zooming respect them.
+  `Fit plot` fits the abundance curves; the current-time marker does not affect
+  the limits. Manual axis ranges persist until you request another fit.
 - `View -> Trajectory Editor` edits loaded `time`, `rho`, and `T` rows and can
   save a modified trajectory.
 - `File -> Save State` writes a portable JSON analysis file.
@@ -288,6 +390,16 @@ Rules:
 - `TUNIT T9K`, `TUNIT T9`, and `TUNIT GK` values are converted to Kelvin.
 - Time must be monotonic non-decreasing.
 - Trajectory files do not contain species abundances.
+- Both backends hold density and temperature at the arithmetic midpoint of each
+  pair of rows during that interval. This approximates a linear trajectory;
+  refine the sampling to resolve rapid changes. Cached rows and condition plots
+  retain the supplied endpoint values. Static conditions are unchanged.
+- This replaces YANN's previous left-endpoint hold and NuPPN's native interpolation
+  for imnet trajectory runs, so changing-condition results can differ from earlier
+  versions.
+
+Flux calculation failures appear as “Flux arrows unavailable” in the chart;
+non-finite diagnostics and fluxes are rejected rather than drawn or exported.
 
 ## Output Files
 
@@ -298,7 +410,13 @@ step,time,rho,temp,dt,dedt,substeps,status,n,p,he4,...
 ```
 
 The abundance columns follow the loaded backend species order. Numeric values
-are written with high precision in scientific notation.
+are written with high precision in scientific notation. CSV files are replaced
+only after the complete export is written successfully. Runs rejected before a
+history is produced leave existing exports untouched. Partial histories remain
+exportable with a `failed` status and a nonzero process exit code. CSV and JSON
+are staged together before replacement; a save failure rolls back earlier
+replacements. This protects against ordinary write failures, but does not make
+the pair atomic against process/machine crashes or concurrent readers.
 
 JSON state export contains:
 
@@ -329,8 +447,19 @@ JSON state export contains:
   should not include proprietary Yann or NuPPN source code.
 - The application treats backend source as external, but the NuPPN build system
   itself may update generated files inside the supplied NuPPN checkout.
+- On macOS/Linux, NuPPN inputs are first initialized in a separate startup checker.
+  A clean exit plus an explicit completion marker are required; Fortran STOP,
+  crashes and a 120-second timeout become errors with captured diagnostics.
+  Keep `imnet_nuppn_probe` beside `imnet` when copying a build; installation includes
+  both executables. Startup initializes the backend twice, once in the checker.
+  This is a preflight check, not isolation of the running solver: input files must
+  remain unchanged between the check and initialization in the application.
 - NuPPN keeps process-global backend state; restart the application to switch
-  to a different NuPPN run directory.
+  run directories or reload edited physics inputs. Reload requests are rejected
+  without changing the current session. Saving the three input files stages all
+  three before replacement and rolls back on failure. If rollback fails, the GUI
+  reports retained recovery files. This protects against ordinary save failures;
+  the group is not atomic against crashes or concurrent readers.
 - Numerical results depend on backend version, rate files, species set,
   timestep controls, and input units. Record these with published runs.
 - The GUI is an inspection tool, not a provenance system. Use headless commands

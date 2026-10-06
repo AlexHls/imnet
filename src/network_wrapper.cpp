@@ -1,12 +1,59 @@
 #include "network_wrapper.h"
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <new>
+
+namespace imyann {
+void validate_history_budget(size_t species_count, int max_steps) {
+  constexpr size_t budget = 256ULL * 1024 * 1024;
+  // Includes four abundance copies, vector growth and per-row metadata.
+  const size_t row_bytes = species_count > budget / 32 ? budget :
+                          1024 + 32 * species_count;
+  const size_t rows = budget / row_bytes;
+  const size_t limit = rows > 0 ? rows - 1 : 0;
+  if (max_steps <= 0 || static_cast<size_t>(max_steps) > limit) {
+    throw std::runtime_error("History memory budget (256 MiB) exceeded: Max steps must be between 1 and " +
+                             std::to_string(limit) + " for this network");
+  }
+}
+void validate_reaction_diagnostic(const ReactionDiagnostic &item) {
+  for (double value : {item.q_value, item.rate, item.abundance_weighted_rate,
+                       item.contribution_dYdt, item.contribution_dXdt}) {
+    if (!std::isfinite(value))
+      throw std::runtime_error("Non-finite reaction diagnostic: " + item.equation);
+  }
+}
+
+void validate_flux_strengths(double rate, double dydt, double dxdt) {
+  for (double value : {rate, dydt, dxdt}) {
+    if (!std::isfinite(value) || value < 0)
+      throw std::runtime_error("Invalid reaction flux strength (non-finite or negative)");
+  }
+}
+
+void validate_integration_snapshot(const IntegrationStepSnapshot &step, size_t species_count) {
+  for (double value : {step.time, step.rho, step.temp, step.dt, step.dedt}) {
+    if (!std::isfinite(value)) throw std::runtime_error("Non-finite integration history value");
+  }
+  if (step.time < 0 || step.rho <= 0 || step.temp <= 0 || step.dt < 0 || step.substeps < 0 ||
+      step.xnuc.size() != species_count ||
+      std::any_of(step.xnuc.begin(), step.xnuc.end(),
+                  [](double x) { return !std::isfinite(x) || x < 0; }))
+    throw std::runtime_error("Invalid integration history value");
+}
+} // namespace imyann
+
 
 #ifdef IMNET_USE_NUPPN
+#include "nuppn_preflight.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <queue>
 #include <stdexcept>
 #include <unordered_map>
@@ -66,6 +113,7 @@ void validate_composition(const std::vector<double> &xnuc,
 }
 
 void check_nuppn_status(int status, const char *operation) {
+  if (status == -1001) throw std::runtime_error("NuPPN returned non-finite energy or invalid abundances");
   if (status != 0) {
     throw std::runtime_error(std::string(operation) + " failed with status " +
                              std::to_string(status));
@@ -143,6 +191,9 @@ NuppnReaction load_nuppn_reaction(int index) {
                          &reaction.outputs[1].count, &reaction.rate,
                          &reaction.flow, &reaction.q_value, &weak),
       "nuppn_get_reaction");
+  if (!std::isfinite(reaction.rate) || !std::isfinite(reaction.flow) ||
+      !std::isfinite(reaction.q_value))
+    throw std::runtime_error("NuPPN returned non-finite reaction data");
   reaction.weak = weak != 0;
   return reaction;
 }
@@ -165,6 +216,7 @@ load_nuppn_step_history(const std::vector<Species> &species) {
                                &step.dedt, &step.substeps, step.xnuc.data(),
                                static_cast<int>(step.xnuc.size())),
         "nuppn_get_history_step");
+    validate_integration_snapshot(step, species.size());
     history.push_back(std::move(step));
   }
   return history;
@@ -205,11 +257,25 @@ Network::Network(const std::string &species_file,
     throw std::runtime_error("NuPPN run directory not found: " + run_dir_);
   }
   run_dir_ = std::filesystem::weakly_canonical(run_dir_).string();
+  for (const char *name : {"ppn_frame.input", "ppn_solver.input",
+                           "ppn_physics.input", "isotopedatabase.txt"}) {
+    const auto path = std::filesystem::path(run_dir_) / name;
+    std::ifstream input(path);
+    if (!std::filesystem::is_regular_file(path) || !input ||
+        input.peek() == std::char_traits<char>::eof()) {
+      throw std::runtime_error("NuPPN required input is missing, unreadable or empty: " + path.string());
+    }
+  }
+  if (!std::filesystem::is_directory(std::filesystem::path(run_dir_).parent_path() / "NPDATA"))
+    throw std::runtime_error("NuPPN requires ../NPDATA beside its run directory");
+
   auto &first_run_dir = initialized_nuppn_run_dir();
   if (!first_run_dir.empty() && first_run_dir != run_dir_) {
     throw std::runtime_error(
         "NuPPN backend is already initialized; restart to change run directory");
   }
+
+  if (first_run_dir.empty()) check_nuppn_startup(run_dir_, nuppn_probe_path());
 
   ScopedCurrentPath cwd(run_dir_);
   check_nuppn_status(nuppn_init(), "nuppn_init");
@@ -238,33 +304,28 @@ Network::~Network() = default;
 
 double Network::integrate(double rho, double temp, std::vector<double> &xnuc,
                           double dt) {
-  last_step_history_.clear();
-  return integrate_interval(rho, temp, rho, temp, xnuc, dt);
-}
-
-double Network::integrate_interval(double rho0, double temp0, double rho1,
-                                   double temp1, std::vector<double> &xnuc,
-                                   double dt) {
   if (!initialized_) {
     throw std::runtime_error("Network not initialized");
   }
 
-  validate_conditions(rho0, temp0);
-  validate_conditions(rho1, temp1);
+  validate_conditions(rho, temp);
   validate_composition(xnuc, species_.size());
   if (!std::isfinite(dt) || dt < 0.0) {
     throw std::runtime_error("Invalid timestep");
   }
 
   last_step_history_.clear();
+  auto result = xnuc;
   double dedt = 0.0;
   ScopedCurrentPath cwd(run_dir_);
   check_nuppn_status(
-      nuppn_integrate(rho0, temp0, rho1, temp1, xnuc.data(),
+      nuppn_integrate(rho, temp, rho, temp, result.data(),
                       static_cast<int>(xnuc.size()), dt, &dedt),
       "nuppn_integrate");
   last_substeps_ = nuppn_last_substeps();
-  validate_composition(xnuc, species_.size());
+  validate_composition(result, species_.size());
+  if (!std::isfinite(dedt)) throw std::runtime_error("NuPPN returned non-finite energy");
+  xnuc = std::move(result);
   return dedt;
 }
 
@@ -277,6 +338,7 @@ double Network::integrate_to_time(double rho, double temp,
     throw std::runtime_error("Network not initialized");
   }
 
+  validate_history_budget(species_.size(), max_steps);
   last_step_history_.clear();
   validate_conditions(rho, temp);
   validate_composition(xnuc, species_.size());
@@ -287,16 +349,20 @@ double Network::integrate_to_time(double rho, double temp,
     throw std::runtime_error("Invalid final-time integration settings");
   }
 
+  auto result = xnuc;
   double dedt = 0.0;
   ScopedCurrentPath cwd(run_dir_);
   const int status =
-      nuppn_integrate_to_time(rho, temp, xnuc.data(),
+      nuppn_integrate_to_time(rho, temp, result.data(),
                               static_cast<int>(xnuc.size()), final_time,
                               initial_dt, max_dt, dt_factor, max_steps, &dedt);
   last_substeps_ = nuppn_last_substeps();
+  if (status == 6) throw std::bad_alloc();
   last_step_history_ = load_nuppn_step_history(species_);
   check_nuppn_status(status, "nuppn_integrate_to_time");
-  validate_composition(xnuc, species_.size());
+  validate_composition(result, species_.size());
+  if (!std::isfinite(dedt)) throw std::runtime_error("NuPPN returned non-finite energy");
+  xnuc = std::move(result);
   return dedt;
 }
 
@@ -338,7 +404,9 @@ double Network::get_reaction_rate(int species_index, double rho, double temp,
       nuppn_get_dxdt(rho, temp, xnuc.data(), static_cast<int>(xnuc.size()),
                      dxdt.data()),
       "nuppn_get_dxdt");
-  return dxdt[static_cast<size_t>(species_index)];
+  const double rate = dxdt[static_cast<size_t>(species_index)];
+  if (!std::isfinite(rate)) throw std::runtime_error("NuPPN returned a non-finite species rate");
+  return rate;
 }
 
 std::vector<ReactionDiagnostic> Network::get_reaction_diagnostics(
@@ -380,6 +448,7 @@ std::vector<ReactionDiagnostic> Network::get_reaction_diagnostics(
         item.contribution_dYdt *
         static_cast<double>(species_[static_cast<size_t>(species_index)].A);
     item.weak = reaction.weak;
+    validate_reaction_diagnostic(item);
     diagnostics.push_back(std::move(item));
   }
 
@@ -424,8 +493,8 @@ std::vector<ReactionFlux> Network::get_reaction_fluxes(
     const double selected_strength = metric == 2   ? strength_rate
                                      : metric == 1 ? strength_dxdt
                                                    : strength_dydt;
-    if (!std::isfinite(strength_rate) || !std::isfinite(strength_dydt) ||
-        !std::isfinite(strength_dxdt) || selected_strength <= 0.0 ||
+    validate_flux_strengths(strength_rate, strength_dydt, strength_dxdt);
+    if (selected_strength <= 0.0 ||
         source < 0 || target < 0 || source == target ||
         source >= num_species() || target >= num_species()) {
       return;
@@ -438,6 +507,7 @@ std::vector<ReactionFlux> Network::get_reaction_fluxes(
     acc.strength_rate += strength_rate;
     acc.strength_dydt += strength_dydt;
     acc.strength_dxdt += strength_dxdt;
+    validate_flux_strengths(acc.strength_rate, acc.strength_dydt, acc.strength_dxdt);
     acc.weak = weak;
     if (selected_strength >= acc.strongest_reaction || acc.equation.empty()) {
       acc.strongest_reaction = selected_strength;
@@ -778,13 +848,6 @@ double Network::integrate(double rho, double temp, std::vector<double> &xnuc,
   return dedt;
 }
 
-double Network::integrate_interval(double rho0, double temp0, double rho1,
-                                   double temp1, std::vector<double> &xnuc,
-                                   double dt) {
-  validate_conditions(rho1, temp1);
-  return integrate(rho0, temp0, xnuc, dt);
-}
-
 double Network::integrate_to_time(double rho, double temp,
                                   std::vector<double> &xnuc,
                                   double final_time, double initial_dt,
@@ -794,6 +857,9 @@ double Network::integrate_to_time(double rho, double temp,
     throw std::runtime_error("Network not initialized");
   }
 
+  validate_history_budget(species_.size(), max_steps);
+  last_step_history_.clear();
+  last_substeps_ = 0;
   validate_conditions(rho, temp);
   validate_composition(xnuc, nd_.nuc_count);
   if (!std::isfinite(final_time) || final_time <= 0.0 ||
@@ -809,19 +875,23 @@ double Network::integrate_to_time(double rho, double temp,
   int steps = 0;
   std::vector<IntegrationStepSnapshot> history;
   history.push_back({0, 0.0, rho, temp, next_dt, 0.0, 0, xnuc});
-  for (; time < final_time && steps < max_steps; ++steps) {
-    const double step_dt = std::min(next_dt, final_time - time);
-    if (!std::isfinite(step_dt) || step_dt <= 0.0) {
-      throw std::runtime_error("Invalid final-time timestep");
+  try {
+    for (; time < final_time && steps < max_steps; ++steps) {
+      const double step_dt = std::min(next_dt, final_time - time);
+      if (!std::isfinite(step_dt) || step_dt <= 0.0 || time + step_dt <= time) {
+        throw std::runtime_error("Invalid final-time timestep");
+      }
+      dedt = integrate(rho, temp, xnuc, step_dt);
+      time += step_dt;
+      history.push_back({static_cast<size_t>(steps + 1), time, rho, temp,
+                         step_dt, dedt, last_substeps_, xnuc});
+      const double grown = step_dt * dt_factor;
+      next_dt = std::min(grown, max_dt);
     }
-    dedt = integrate(rho, temp, xnuc, step_dt);
-    time += step_dt;
-    history.push_back({static_cast<size_t>(steps + 1), time, rho, temp,
-                       step_dt, dedt, last_substeps_, xnuc});
-    const double grown = step_dt * dt_factor;
-    next_dt =
-        std::min(std::isfinite(grown) && grown > 0.0 ? grown : max_dt,
-                 max_dt);
+  } catch (...) {
+    last_substeps_ = steps;
+    last_step_history_ = std::move(history);
+    throw;
   }
   if (time < final_time) {
     last_substeps_ = steps;
@@ -939,6 +1009,7 @@ std::vector<ReactionDiagnostic> Network::get_reaction_diagnostics(
     item.contribution_dXdt =
         item.contribution_dYdt * static_cast<double>(nuc.na);
     item.weak = false;
+    validate_reaction_diagnostic(item);
     diagnostics.push_back(std::move(item));
   }
 
@@ -960,6 +1031,7 @@ std::vector<ReactionDiagnostic> Network::get_reaction_diagnostics(
     item.contribution_dXdt =
         item.contribution_dYdt * static_cast<double>(nuc.na);
     item.weak = true;
+    validate_reaction_diagnostic(item);
     diagnostics.push_back(std::move(item));
   }
 
@@ -1011,8 +1083,8 @@ std::vector<ReactionFlux> Network::get_reaction_fluxes(
     const double selected_strength = metric == 2   ? strength_rate
                                      : metric == 1 ? strength_dxdt
                                                    : strength_dydt;
-    if (!std::isfinite(strength_rate) || !std::isfinite(strength_dydt) ||
-        !std::isfinite(strength_dxdt) || selected_strength <= 0.0 ||
+    validate_flux_strengths(strength_rate, strength_dydt, strength_dxdt);
+    if (selected_strength <= 0.0 ||
         source < 0 || target < 0 || source == target ||
         source >= static_cast<int>(nd_.nuc_count) ||
         target >= static_cast<int>(nd_.nuc_count)) {
@@ -1026,6 +1098,7 @@ std::vector<ReactionFlux> Network::get_reaction_fluxes(
     acc.strength_rate += strength_rate;
     acc.strength_dydt += strength_dydt;
     acc.strength_dxdt += strength_dxdt;
+    validate_flux_strengths(acc.strength_rate, acc.strength_dydt, acc.strength_dxdt);
     acc.weak = weak;
     if (selected_strength >= acc.strongest_reaction || acc.equation.empty()) {
       acc.strongest_reaction = selected_strength;
@@ -1231,3 +1304,16 @@ std::vector<std::vector<int>> Network::build_connectivity_graph() const {
 } // namespace imyann
 
 #endif
+
+namespace imyann {
+double Network::integrate_interval(double rho0, double temp0, double rho1,
+                                   double temp1, std::vector<double> &xnuc,
+                                   double dt) {
+  validate_conditions(rho0, temp0);
+  validate_conditions(rho1, temp1);
+  // A shared midpoint hold: refine trajectory rows to resolve rapid changes.
+  // This form avoids overflowing the sum of two finite positive endpoints.
+  return integrate(rho0 + (rho1 - rho0) * 0.5,
+                   temp0 + (temp1 - temp0) * 0.5, xnuc, dt);
+}
+} // namespace imyann

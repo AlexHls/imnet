@@ -78,6 +78,14 @@ int main() {
   require(loaded == xnuc);
   require(!save_abundances((directory / "bad.txt").string(), {"p"}, xnuc));
 
+  // Unknown species are warnings, but invalid values must still be rejected.
+  {
+    std::ofstream file(invalid);
+    file << "p 0.5\nunknown -1\n";
+  }
+  require(!load_abundances(invalid.string(), {"p", "he4"}, loaded));
+  require(loaded == xnuc);
+
   const auto data = std::filesystem::path(IMNET_TEST_DATA_DIR);
   const auto empty_weak_rates = directory / "empty_weak_rates.txt";
   std::ofstream{empty_weak_rates};
@@ -102,6 +110,13 @@ int main() {
       (data / "part.txt").string(), (data / "mass.txt").string(),
       (data / "lmp_weak_rates.txt").string()));
   auto &settings = state.integration_settings();
+  std::string validation_error;
+  require(!state.validate_integration_settings(validation_error)); // initially all zero
+  settings.xnuc.assign(state.num_species(), std::numeric_limits<double>::max());
+  const auto overflowing = settings.xnuc;
+  require(!state.normalize_abundances());
+  require(settings.xnuc == overflowing);
+
   settings.xnuc.assign(state.num_species(), 0.0);
   settings.xnuc[1] = 0.5;
   settings.xnuc[2] = 0.5;
@@ -164,6 +179,51 @@ int main() {
           std::string::npos);
   require(json.str().find("\"strength_dxdt\"") != std::string::npos);
   require(json.str().find("\"strength_rate\"") != std::string::npos);
+
+  // Save State exports computed cache rows, even when visible inputs were edited.
+  settings.temp = 2e8;
+  require(state.save_state_to_file(saved_state.string()));
+  std::ifstream cached_export(saved_state);
+  std::stringstream cached_json;
+  cached_json << cached_export.rdbuf();
+  require(cached_json.str() == json.str());
+
+  // View metadata must not introduce NaN into otherwise valid JSON.
+  const double saved_threshold = state.view_settings().flux_threshold;
+  state.view_settings().flux_threshold = std::numeric_limits<double>::quiet_NaN();
+  require(!state.save_state_to_file(saved_state.string()));
+  state.view_settings().flux_threshold = saved_threshold;
+
+  // Failed exports must not truncate an existing result.
+  state.clear_trajectory_cache();
+  settings.temp = std::numeric_limits<double>::quiet_NaN();
+  require(!state.save_state_to_file(saved_state.string()));
+  std::ifstream preserved(saved_state);
+  std::stringstream preserved_json;
+  preserved_json << preserved.rdbuf();
+  require(preserved_json.str() == json.str());
+  settings.temp = 5e9;
+  const double before_time = state.current_time();
+  settings.dt = 1e-12;
+  require(state.integrate_single_step(false, flux_state_dedt, validation_error));
+  require(std::abs(state.current_time() - before_time - settings.dt) < 1e-24);
+
+  {
+    std::ofstream file(trajectory);
+    file << "0 1e9 5e9\n1e-12 1e9 5e9\n1e-12 1e9 5e9\n";
+  }
+  require(state.load_trajectory_file(trajectory.string()));
+  require(state.run_trajectory(validation_error));
+  require(state.trajectory_cache().back().substeps == 0);
+  settings.dt = 1e-12;
+  settings.final_time = 4e-12;
+  settings.max_steps = std::numeric_limits<int>::max();
+  require(!state.run_to_time(false, validation_error));
+  settings.max_steps = 1;
+  require(!state.run_to_time(false, validation_error));
+  require(state.trajectory_cache().size() == 2);
+  require(!state.trajectory_cache().back().success);
+  require(state.trajectory_cache().back().time == 1e-12);
 
   std::filesystem::remove_all(directory);
   return 0;

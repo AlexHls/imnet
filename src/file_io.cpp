@@ -3,9 +3,12 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
+#include <random>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -185,6 +188,94 @@ bool parse_trajectory_metadata(const std::string &line,
 
 } // namespace
 
+bool write_files_transactional(const std::vector<FileWrite> &files, std::string &error) {
+  namespace fs = std::filesystem;
+  struct StagedFile {
+    fs::path target, directory;
+    bool existed = false;
+    bool committed = false;
+    bool retain_backup = false;
+  };
+  std::vector<StagedFile> staged;
+  error.clear();
+  bool saved = false;
+  try {
+    staged.reserve(files.size());
+    for (const auto &file : files) {
+      fs::path target(file.filename);
+      // Follow existing symlinks, preserving the link itself.
+      if (fs::is_symlink(target)) target = fs::canonical(target);
+      target = fs::weakly_canonical(target);
+      const bool exists = fs::exists(target);
+      if (exists && !fs::is_regular_file(target))
+        throw std::runtime_error("Destination is not a regular file: " + target.string());
+      for (const auto &previous : staged) {
+        if (target == previous.target ||
+            (exists && previous.existed && fs::equivalent(target, previous.target)))
+          throw std::runtime_error("Duplicate save destination: " + target.string());
+      }
+      staged.push_back({target, {}, exists});
+      auto &entry = staged.back();
+      std::random_device random;
+      for (int attempt = 0; attempt < 100; ++attempt) {
+        const auto candidate = target.parent_path() /
+            ("." + target.filename().string() + ".tmp-" + std::to_string(random()));
+        if (fs::create_directory(candidate)) {
+          entry.directory = candidate;
+          break;
+        }
+      }
+      if (entry.directory.empty()) throw std::runtime_error("Cannot reserve temporary file");
+      fs::permissions(entry.directory, fs::perms::owner_all);
+      // Single-file replacement needs no rollback after its one successful rename.
+      if (files.size() > 1 && exists)
+        fs::copy_file(target, entry.directory / "previous");
+      const auto temporary = entry.directory / "output";
+      std::ofstream out(temporary, std::ios::binary);
+      out.exceptions(std::ios::failbit | std::ios::badbit);
+      file.write(out);
+      out.close();
+      if (exists) fs::permissions(temporary, fs::status(target).permissions());
+    }
+    for (auto &entry : staged) {
+      fs::rename(entry.directory / "output", entry.target);
+      entry.committed = true;
+    }
+    saved = true;
+  } catch (const std::exception &e) {
+    error = e.what();
+    for (auto it = staged.rbegin(); it != staged.rend(); ++it) {
+      if (!it->committed) continue;
+      std::error_code rollback_error;
+      if (it->existed)
+        fs::rename(it->directory / "previous", it->target, rollback_error);
+      else
+        fs::remove(it->target, rollback_error);
+      if (rollback_error) {
+        it->retain_backup = true;
+        error += "; rollback failed for " + it->target.string() + ": " + rollback_error.message() +
+                 "; recovery files retained in " + it->directory.string();
+      }
+    }
+  }
+  for (const auto &entry : staged) {
+    if (entry.directory.empty() || entry.retain_backup) continue;
+    std::error_code ignored;
+    fs::remove(entry.directory / "output", ignored);
+    fs::remove(entry.directory / "previous", ignored);
+    fs::remove(entry.directory, ignored);
+  }
+  return saved;
+}
+
+bool write_file_atomic(const std::string &filename,
+                       const std::function<void(std::ostream &)> &write) {
+  std::string error;
+  if (write_files_transactional({{filename, write}}, error)) return true;
+  std::cerr << "Error saving " << filename << ": " << error << std::endl;
+  return false;
+}
+
 bool save_abundances(const std::string &filename,
                      const std::vector<std::string> &species_names,
                      const std::vector<double> &xnuc) {
@@ -201,25 +292,13 @@ bool save_abundances(const std::string &filename,
     }
   }
 
-  std::ofstream file(filename);
-
-  if (!file.is_open()) {
-    std::cerr << "Error: Could not open output file: " << filename << std::endl;
-    return false;
-  }
-
-  file << "# species mass_fraction\n";
-  file << std::setprecision(17) << std::scientific;
-  for (size_t i = 0; i < xnuc.size(); ++i) {
-    file << species_names[i] << " " << xnuc[i] << "\n";
-  }
-
-  file.close();
-  if (!file) {
-    std::cerr << "Error: Failed while writing abundance file: " << filename
-              << std::endl;
-    return false;
-  }
+  if (!write_file_atomic(filename, [&](std::ostream &file) {
+    file << "# species mass_fraction\n";
+    file << std::setprecision(17) << std::scientific;
+    for (size_t i = 0; i < xnuc.size(); ++i) {
+      file << species_names[i] << " " << xnuc[i] << "\n";
+    }
+  })) return false;
   std::cout << "Saved abundances to " << filename << std::endl;
   return true;
 }
@@ -263,8 +342,8 @@ bool load_abundances(const std::string &filename,
       return false;
     }
 
-    if (!std::isfinite(value)) {
-      std::cerr << "Error: Non-finite abundance file value on line: " << line
+    if (!std::isfinite(value) || value < 0.0) {
+      std::cerr << "Error: Invalid abundance file value on line: " << line
                 << std::endl;
       return false;
     }
@@ -300,6 +379,7 @@ bool load_abundances(const std::string &filename,
     }
   }
 
+  if (file.bad()) return false;
   if (matched_species_count == 0) {
     std::cerr << "Error: No known species abundances found in " << filename
               << std::endl;
@@ -396,6 +476,7 @@ bool load_trajectory(const std::string &filename, std::vector<double> &times,
     parsed_temps.push_back(temp);
   }
 
+  if (file.bad()) return false;
   if (parsed_times.empty()) {
     std::cerr << "Error: No trajectory data loaded from " << filename
               << std::endl;
@@ -440,25 +521,13 @@ bool save_trajectory(const std::string &filename,
     }
   }
 
-  std::ofstream file(filename);
-  if (!file.is_open()) {
-    std::cerr << "Error: Could not open trajectory output file: " << filename
-              << std::endl;
-    return false;
-  }
-
-  file << "# time(s) rho(g/cm^3) temp(K)\n";
-  file << std::setprecision(17) << std::scientific;
-  for (size_t i = 0; i < times.size(); ++i) {
-    file << times[i] << " " << rhos[i] << " " << temps[i] << "\n";
-  }
-
-  file.close();
-  if (!file) {
-    std::cerr << "Error: Failed while writing trajectory file: " << filename
-              << std::endl;
-    return false;
-  }
+  if (!write_file_atomic(filename, [&](std::ostream &file) {
+    file << "# time(s) rho(g/cm^3) temp(K)\n";
+    file << std::setprecision(17) << std::scientific;
+    for (size_t i = 0; i < times.size(); ++i) {
+      file << times[i] << " " << rhos[i] << " " << temps[i] << "\n";
+    }
+  })) return false;
   std::cout << "Saved trajectory to " << filename << std::endl;
   return true;
 }

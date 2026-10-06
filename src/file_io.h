@@ -1,10 +1,25 @@
 #ifndef IMYANN_FILE_IO_H
 #define IMYANN_FILE_IO_H
 
+#include <functional>
+#include <ostream>
 #include <string>
 #include <vector>
 
 namespace imyann {
+
+struct FileWrite {
+  std::string filename;
+  std::function<void(std::ostream &)> write;
+};
+
+// Stage all files first and roll back completed replacements on failure.
+// Not crash-atomic as a group; error includes recovery paths if rollback fails.
+bool write_files_transactional(const std::vector<FileWrite> &files, std::string &error);
+
+// Write beside the destination, then replace it only after a successful close.
+bool write_file_atomic(const std::string &filename,
+                       const std::function<void(std::ostream &)> &write);
 
 /**
  * @brief Save abundances to a file

@@ -27,6 +27,9 @@ extern "C" {
 
 namespace imyann {
 
+// Conservative 256 MiB budget for native, wrapper and application history copies.
+void validate_history_budget(size_t species_count, int max_steps);
+
 /**
  * @struct Species
  * @brief Represents a single nuclear species (isotope)
@@ -59,6 +62,10 @@ struct ReactionFlux {
   std::string equation;
 };
 
+// Validate values before diagnostic sorting, arrow filtering and JSON export.
+void validate_reaction_diagnostic(const ReactionDiagnostic &item);
+void validate_flux_strengths(double rate, double dydt, double dxdt);
+
 struct IntegrationStepSnapshot {
   size_t index = 0;
   double time = 0.0;
@@ -69,6 +76,9 @@ struct IntegrationStepSnapshot {
   int substeps = 0;
   std::vector<double> xnuc;
 };
+
+// Reject invalid solver history before it reaches plotting or export.
+void validate_integration_snapshot(const IntegrationStepSnapshot &step, size_t species_count);
 
 /**
  * @class Network
@@ -112,7 +122,9 @@ public:
                    double dt);
 
   /**
-   * @brief Integrate from one thermodynamic state to another over dt
+   * @brief Integrate over dt at the arithmetic midpoint of endpoint rho and T.
+   * Refine trajectory sampling to resolve changing conditions; both backends
+   * use this same piecewise-constant approximation.
    */
   double integrate_interval(double rho0, double temp0, double rho1,
                             double temp1, std::vector<double> &xnuc,

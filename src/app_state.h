@@ -3,6 +3,7 @@
 
 #include "network_wrapper.h"
 #include <memory>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -31,21 +32,21 @@ struct IntegrationSettings {
  * @brief UI view and display settings
  */
 struct ViewSettings {
-  float chart_zoom = 1.0f;        ///< Zoom level for nuclide chart
-  bool show_unconnected = false;  ///< Highlight unconnected species
-  bool show_abundance = false;    ///< Color-code by abundance
-  bool show_fluxes = false;       ///< Draw reaction flux arrows
+  float chart_zoom = 1.0f;         ///< Zoom level for nuclide chart
+  bool show_unconnected = false;   ///< Highlight unconnected species
+  bool show_abundance = false;     ///< Color-code by abundance
+  bool show_fluxes = false;        ///< Draw reaction flux arrows
   bool show_regular_fluxes = true; ///< Draw regular reaction arrows
   bool show_weak_fluxes = true;    ///< Draw weak reaction arrows
-  int flux_arrow_metric = 0;      ///< 0 = |dY/dt|, 1 = |dX/dt|, 2 = rate
-  double flux_threshold = 1e-30;  ///< Minimum flux strength to display
-  int max_flux_arrows = 80;       ///< Maximum displayed arrows per type
-  int flux_color_mode = 0;        ///< 0 = flat, 1 = linear, 2 = log flux
-  int flux_colormap = 0;          ///< Colormap for scaled flux arrows
-  int flux_colorbar_position = 3; ///< Preset colorbar position
+  int flux_arrow_metric = 0;       ///< 0 = |dY/dt|, 1 = |dX/dt|, 2 = rate
+  double flux_threshold = 1e-30;   ///< Minimum flux strength to display
+  int max_flux_arrows = 80;        ///< Maximum displayed arrows per type
+  int flux_color_mode = 0;         ///< 0 = flat, 1 = linear, 2 = log flux
+  int flux_colormap = 0;           ///< Colormap for scaled flux arrows
+  int flux_colorbar_position = 3;  ///< Preset colorbar position
   float flux_color[4] = {1.00f, 0.22f, 0.64f, 0.95f};
   float weak_flux_color[4] = {0.50f, 1.00f, 0.36f, 0.95f};
-  int max_cached_trajectory_steps = 100; ///< Max trajectory rows to cache
+  int max_cached_trajectory_steps = 3000; ///< Max trajectory rows to cache
 };
 
 struct TrajectoryStepCache {
@@ -72,6 +73,7 @@ struct TrajectoryStepCache {
 class AppState {
 public:
   AppState() = default;
+  double current_time() const { return current_time_; }
   ~AppState() = default;
 
   // Deleted copy/move
@@ -167,6 +169,10 @@ public:
   /**
    * @brief Integrate at fixed rho/T until final_time
    */
+  // Build a constant-condition time grid without running the solver. Rejecting
+  // a plan leaves the current composition and trajectory untouched.
+  bool prepare_final_time_trajectory(bool normalize_before, std::string &error);
+
   bool run_to_time(bool normalize_before, std::string &error);
 
   /**
@@ -207,6 +213,7 @@ public:
    * @brief Save the current scientific state for external analysis
    */
   bool save_state_to_file(const std::string &filename) const;
+  bool write_state(std::ostream &destination) const;
 
   /**
    * @brief Run full loaded trajectory and cache compositions
@@ -338,8 +345,7 @@ public:
   get_species_reaction_diagnostics(int species_index,
                                    size_t max_count = 12) const;
 
-  std::vector<ReactionFlux> get_reaction_fluxes(double min_strength,
-                                                int metric,
+  std::vector<ReactionFlux> get_reaction_fluxes(double min_strength, int metric,
                                                 size_t max_count = 100,
                                                 bool include_regular = true,
                                                 bool include_weak = true) const;
@@ -356,6 +362,7 @@ private:
   std::unique_ptr<Network> network_;
   std::vector<std::string> species_names_;
   std::vector<Species> species_data_;
+  double current_time_ = 0.0;
   std::vector<double> initial_xnuc_; ///< Backup of initial abundances
   std::string species_file_;
   std::string reaclib_file_;
@@ -375,6 +382,7 @@ private:
   std::string last_status_ = "current";
   std::string last_error_;
 
+  bool validate_final_time_settings(std::string &error) const;
   void invalidate_trajectory_cache();
   bool validate_composition(std::string &error) const;
   bool validate_trajectory_arrays(const std::vector<double> &times,

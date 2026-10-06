@@ -1,6 +1,8 @@
 #ifndef IMYANN_UI_MAIN_WINDOW_H
 #define IMYANN_UI_MAIN_WINDOW_H
 
+#include "ui_plot_helpers.h"
+
 #include "app_state.h"
 #include "ui_nuclide_chart.h"
 #include <string>
@@ -37,7 +39,7 @@ public:
   /**
    * @brief Set the application state
    */
-  void set_app_state(AppState *state);
+  void set_app_state(AppState *state, int run_mode = 0);
 
   /**
    * @brief Main event loop
@@ -68,6 +70,7 @@ public:
   GLFWwindow *native_window() { return window_; }
 
 private:
+  friend class MainWindowTest;
   GLFWwindow *window_;
   int width_, height_;
   bool should_close_;
@@ -95,7 +98,12 @@ private:
   std::string status_message_;
   char isotope_filter_[64];
   char abundance_plot_filter_[64];
-  double abundance_plot_log_floor_;
+  LogPlotFloor trajectory_plot_x_floor_{1e-9, 1e-9};
+  double isotope_info_rho_ = 0.0;
+  double isotope_info_temp_ = 0.0;
+  std::vector<double> isotope_info_xnuc_;
+  LogPlotFloor abundance_plot_x_floor_{1e-9, 1e-9};
+  LogPlotFloor abundance_plot_y_floor_{1e-99, 1e-99};
   std::vector<int> abundance_plot_isotopes_;
   int isotope_info_index_;
   double isotope_info_rate_;
@@ -134,6 +142,8 @@ private:
 
   struct TrajectoryIntegrationJob {
     bool active = false;
+    bool final_time_run = false;
+    double initial_dt = 0.0;
     bool failed = false;
     bool complete = false;
     size_t current_step = 0;
@@ -218,7 +228,8 @@ private:
   /**
    * @brief Start non-blocking trajectory integration
    */
-  void start_trajectory_integration_job();
+  void start_final_time_integration_job();
+  void start_trajectory_integration_job(bool final_time_run = false);
 
   /**
    * @brief Stop non-blocking trajectory integration
@@ -253,8 +264,8 @@ private:
   /**
    * @brief Apply a simple initial composition preset
    */
-  void apply_composition_preset(const std::vector<std::pair<std::string, double>>
-                                    &composition);
+  void apply_composition_preset(
+      const std::vector<std::pair<std::string, double>> &composition);
 
   /**
    * @brief Select an isotope in app state and chart
