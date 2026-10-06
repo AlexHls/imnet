@@ -1380,6 +1380,8 @@ void MainWindow::process_trajectory_integration_job() {
         trajectory_job_.cache,
         static_cast<size_t>(std::clamp(trajectory_step_ui_, 0,
                                        static_cast<int>(loaded_steps - 1))));
+    if (trajectory_job_.final_time_run)
+      app_state_->integration_settings().dt = trajectory_job_.initial_dt;
     return;
   }
 
@@ -1428,6 +1430,8 @@ void MainWindow::process_trajectory_integration_job() {
         trajectory_job_.cache,
         static_cast<size_t>(std::clamp(trajectory_step_ui_, 0,
                                        static_cast<int>(loaded_steps - 1))));
+    if (trajectory_job_.final_time_run)
+      app_state_->integration_settings().dt = trajectory_job_.initial_dt;
     return;
   }
 

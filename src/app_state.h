@@ -3,6 +3,7 @@
 
 #include "network_wrapper.h"
 #include <memory>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -212,6 +213,7 @@ public:
    * @brief Save the current scientific state for external analysis
    */
   bool save_state_to_file(const std::string &filename) const;
+  bool write_state(std::ostream &destination) const;
 
   /**
    * @brief Run full loaded trajectory and cache compositions

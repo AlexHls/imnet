@@ -146,8 +146,9 @@ int run_headless(AppState &app_state, const CliOptions &options) {
     if (!has_history || app_state.trajectory_cache().size() <= 1) return 1;
   }
 
+  std::vector<FileWrite> outputs;
   if (!options.output_file.empty()) {
-    if (!write_file_atomic(options.output_file, [&](std::ostream &out) {
+    outputs.push_back({options.output_file, [&](std::ostream &out) {
       out << std::setprecision(17) << std::scientific;
       write_headless_header(out, app_state.get_species_names());
       if (has_history) {
@@ -161,11 +162,18 @@ int run_headless(AppState &app_state, const CliOptions &options) {
                            settings.dt, dedt, app_state.get_network()->last_substeps(),
                            "ok", settings.xnuc);
       }
-    })) return 1;
+    }});
   }
-  const bool saved = options.state_file.empty() ||
-                     app_state.save_state_to_file(options.state_file);
-  return success && saved ? 0 : 1;
+  if (!options.state_file.empty()) {
+    outputs.push_back({options.state_file, [&](std::ostream &out) {
+      if (!app_state.write_state(out)) throw std::runtime_error("Cannot serialize state");
+    }});
+  }
+  if (!write_files_transactional(outputs, error)) {
+    std::cerr << "Cannot save results: " << error << std::endl;
+    return 1;
+  }
+  return success ? 0 : 1;
 }
 
 } // namespace

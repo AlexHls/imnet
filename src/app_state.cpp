@@ -648,6 +648,14 @@ bool AppState::save_trajectory_file(const std::string &filename) const {
 }
 
 bool AppState::save_state_to_file(const std::string &filename) const {
+  if (!write_file_atomic(filename, [&](std::ostream &out) {
+        if (!write_state(out)) throw std::runtime_error("Cannot serialize state");
+      })) return false;
+  std::cout << "Saved state to " << filename << std::endl;
+  return true;
+}
+
+bool AppState::write_state(std::ostream &destination) const {
   std::string error;
   if (!network_ || !validate_composition(error) ||
       species_data_.size() != species_names_.size()) {
@@ -803,10 +811,8 @@ bool AppState::save_state_to_file(const std::string &filename) const {
     return false;
   }
   out << "\n  ]\n}\n";
-  if (!write_file_atomic(filename, [&](std::ostream &file) { file << out.str(); }))
-    return false;
-  std::cout << "Saved state to " << filename << std::endl;
-  return true;
+  destination << out.str();
+  return static_cast<bool>(destination);
 }
 
 bool AppState::run_trajectory() {

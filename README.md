@@ -414,7 +414,9 @@ are written with high precision in scientific notation. CSV files are replaced
 only after the complete export is written successfully. Runs rejected before a
 history is produced leave existing exports untouched. Partial histories remain
 exportable with a `failed` status and a nonzero process exit code. CSV and JSON
-are saved individually, not as a single transaction.
+are staged together before replacement; a save failure rolls back earlier
+replacements. This protects against ordinary write failures, but does not make
+the pair atomic against process/machine crashes or concurrent readers.
 
 JSON state export contains:
 

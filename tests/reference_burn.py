@@ -351,6 +351,16 @@ def main():
     assert completed.returncode != 0
     assert protected_csv.read_text() == "previous CSV"
     assert protected_json.read_text() == "previous JSON"
+    # A failed second destination must not replace the first export.
+    blocked_json = work / "blocked.json"
+    blocked_json.mkdir()
+    blocked_command = [blocked_json if x == protected_json else x for x in command]
+    completed = subprocess.run([str(x) for x in blocked_command],
+                               cwd=work, capture_output=True, timeout=30)
+    assert completed.returncode != 0
+    assert protected_csv.read_text() == "previous CSV"
+    assert protected_json.read_text() == "previous JSON"
+    assert blocked_json.is_dir()
     completed = subprocess.run([str(x) for x in command + ["--max-steps", 1]],
                                cwd=work, capture_output=True, timeout=30)
     assert completed.returncode != 0

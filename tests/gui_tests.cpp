@@ -150,6 +150,23 @@ public:
             state.trajectory_cache().size() == partial.size(),
             "Invalid final-time plan destroyed previous results");
 
+    settings.dt = 0.001;
+    settings.dt_max = 0.008;
+    settings.dt_factor = 2;
+    settings.final_time = 0.021;
+    settings.max_steps = 32;
+    window.start_final_time_integration_job();
+    window.process_trajectory_integration_job();
+    const auto completed_time = state.current_time();
+    const auto completed_composition = settings.xnuc;
+    // Force a wrapper validation failure before entering either native solver.
+    window.trajectory_job_.xnuc[0] = -1;
+    window.process_trajectory_integration_job();
+    require(window.trajectory_job_.failed && !window.trajectory_job_.active &&
+            settings.dt == 0.001 && state.current_time() == completed_time &&
+            settings.xnuc == completed_composition,
+            "Failed final-time interval changed timestep input or completed state");
+
   }
 };
 } // namespace imyann
